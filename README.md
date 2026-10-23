@@ -89,3 +89,8 @@ Xiaomi/LineageOS SM8250 hardware references. Existing per-file notices and
 `upstream.json` provenance remain in place. See [NOTICE.md](NOTICE.md) and
 [LICENSE](LICENSE). Maintained by [reAAAq](https://github.com/reAAAq), independently
 of the UniXNU organization.
+
+### Project Credits & Provenance
+- **UniXNU Base:** [UniXNU](https://github.com/UniXNU/UniXNU)
+- **Upstream Mi 10 Port & Attempt 80 Touch Baseline:** [reAAAq](https://github.com/reAAAq) ([UniXNU-umi](https://github.com/reAAAq/UniXNU-umi))
+- **Standalone ST FTS521 Touch Integration & Hardware Verification:** [omertrans678](https://github.com/omertrans678) ([UniXNU-umi](https://github.com/omertrans678/UniXNU-umi))
