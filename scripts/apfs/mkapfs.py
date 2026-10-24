@@ -125,16 +125,22 @@ class Node:
 def read_tree(path, name=''):
     st = os.lstat(path)
     if stat.S_ISDIR(st.st_mode):
-        node = Node(name, st.st_mode)
+        node = Node(name, 0o040755)
         for entry in sorted(os.listdir(path)):
             child = read_tree(os.path.join(path, entry), entry)
             if child is not None:
                 node.children[entry] = child
         return node
     if stat.S_ISREG(st.st_mode):
-        return Node(name, st.st_mode, source=path)
+        if name.endswith('.plist') or name.endswith('.conf') or 'LaunchDaemons' in path or 'Preferences' in path:
+            m = 0o100644
+        elif name.endswith('.dylib') or 'bin' in path or 'sbin' in path or 'driver' in path or 'Redwood' in name:
+            m = 0o100755
+        else:
+            m = 0o100644
+        return Node(name, m, source=path)
     if stat.S_ISLNK(st.st_mode):
-        return Node(name, st.st_mode, target=os.fsencode(os.readlink(path)))
+        return Node(name, 0o120755, target=os.fsencode(os.readlink(path)))
     return None                         # device nodes, FIFOs, sockets: /dev is devfs
 
 
