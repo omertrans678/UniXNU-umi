@@ -73,6 +73,15 @@ def main():
     k[0x4be770:0x4be770 + len(drv_data)] = drv_data
     print(f"Wrote {len(drv_data)} bytes of STMicro FTS521 driver at file offset 0x4be770 (va 0xfffffff0074c2770)")
 
+    # 4c. Enable Adreno Step 22 (hardware drawing test: _step_frame)
+    k[0x4d1664:0x4d1668] = bytes.fromhex("c8028052")
+    k[0x4d1948:0x4d194c] = bytes.fromhex("c9028052")
+    print("Patched adreno step limit 21 -> 22 at file offsets 0x4d1664 and 0x4d1948")
+
+    # 4d. Force _step_frame to show GPU render on panel (bypass early check, always scan out)
+    k[0x4d7b68:0x4d7b6c] = bytes.fromhex("0a000014")
+    print("Patched _step_frame at file offset 0x4d7b68 -> branch to MiniIOMobileFramebufferShow")
+
     KERNEL_OUT.parent.mkdir(parents=True, exist_ok=True)
     KERNEL_OUT.write_bytes(k)
     print(f"Kernel successfully written to {KERNEL_OUT} ({len(k)} bytes)")
