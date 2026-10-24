@@ -2,7 +2,7 @@
  * touch_umi.c — Native UniXNU Xiaomi Mi 10 (umi / SM8250) Touchscreen Driver.
  * STMicroelectronics FTS521 / FTM5 capacitive touch controller.
  * Bitbanged Open-Drain I2C bus on GPIO36 (SDA) / GPIO37 (SCL).
- * Feeds multi-touch events directly to Apple iOS / Redwood via _redwood_touch_post.
+ * Feeds multi-touch events directly to Apple iOS XNU via kernel touch queue.
  */
 
 typedef unsigned char uint8_t;
@@ -26,15 +26,15 @@ typedef _Bool bool;
 
 #define FTS_SLAVE_ADDR  0x49
 
-/* Redwood / iOS Touch Types */
-#define REDWOOD_TOUCH_DOWN       1
-#define REDWOOD_TOUCH_MOVE       2
-#define REDWOOD_TOUCH_UP         3
+/* Native Umi / iOS Touch Types */
+#define UMI_TOUCH_DOWN       1
+#define UMI_TOUCH_MOVE       2
+#define UMI_TOUCH_UP         3
 
 /* Function pointers into XNU kernel */
 #define KERN_ML_IO_MAP          0xfffffff007464228UL
 #define KERN_PRINTF             0xfffffff0074c61b4UL
-#define KERN_REDWOOD_TOUCH_POST 0xfffffff0074c1a08UL
+#define KERN_TOUCH_POST         0xfffffff0074c1a08UL
 #define KERN_RPMH_RESOURCE      0xfffffff0074f2168UL
 #define KERN_RPMH_WRITE         0xfffffff0074f1f80UL
 #define KERN_RSC_CACHE_PTR      0xfffffff007eac768UL
@@ -226,7 +226,7 @@ static int fts_read_fifo(umi_touch_ctx_t *ctx, uint8_t *ev) {
 
 static void post_touch(uint32_t type, uint32_t id, uint32_t x, uint32_t y) {
     typedef void (*fn_t)(uint64_t type, uint64_t id, uint64_t x, uint64_t y);
-    ((fn_t)KERN_REDWOOD_TOUCH_POST)((uint64_t)type, (uint64_t)id, (uint64_t)x, (uint64_t)y);
+    ((fn_t)KERN_TOUCH_POST)((uint64_t)type, (uint64_t)id, (uint64_t)x, (uint64_t)y);
 }
 
 typedef uintptr_t (*ml_io_map_fn)(uint64_t phys, uint64_t size);
@@ -383,7 +383,7 @@ void __attribute__((section(".text.umi_touch_thread"))) umi_touch_thread(void *a
                     uint32_t ny = (ry * 65535) / 2339;
 
                     if (touch_id < 10) {
-                        uint32_t type = (kind == 1) ? REDWOOD_TOUCH_DOWN : REDWOOD_TOUCH_MOVE;
+                        uint32_t type = (kind == 1) ? UMI_TOUCH_DOWN : UMI_TOUCH_MOVE;
                         post_touch(type, touch_id, nx, ny);
                         ctx.contacts[touch_id].down = true;
                         ctx.contacts[touch_id].x = nx;
@@ -395,13 +395,13 @@ void __attribute__((section(".text.umi_touch_thread"))) umi_touch_thread(void *a
                 } else if (kind == 3) {
                     // Touch UP
                     if (touch_id < 10 && ctx.contacts[touch_id].down) {
-                        post_touch(REDWOOD_TOUCH_UP, touch_id, ctx.contacts[touch_id].x, ctx.contacts[touch_id].y);
+                        post_touch(UMI_TOUCH_UP, touch_id, ctx.contacts[touch_id].x, ctx.contacts[touch_id].y);
                         ctx.contacts[touch_id].down = false;
                         klog("umi_touch: TOUCH UP id=%u\n", (uint64_t)touch_id, 0, 0, 0, 0, 0);
                     } else {
                         for (int f = 0; f < 10; f++) {
                             if (ctx.contacts[f].down) {
-                                post_touch(REDWOOD_TOUCH_UP, f, ctx.contacts[f].x, ctx.contacts[f].y);
+                                post_touch(UMI_TOUCH_UP, f, ctx.contacts[f].x, ctx.contacts[f].y);
                                 ctx.contacts[f].down = false;
                             }
                         }

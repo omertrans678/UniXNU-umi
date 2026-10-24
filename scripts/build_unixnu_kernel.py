@@ -57,14 +57,15 @@ def main():
     print(f"Touch driver binary size: {bin_size} bytes (limit 6288)")
     assert bin_size <= 6288, f"Binary too large: {bin_size} > 6288"
 
-    print("=== 3b. Compiling native UniXNU RedwoodGL Userland Bridge ===")
-    gl_c = f"{WSL_BASE}/package/libredwood-gl.c"
-    gl_dylib = f"{WSL_BASE}/build/libredwood-gl.dylib"
+    print("=== 3b. Compiling native UniXNU UmiGL Userland Bridge ===")
+    gl_c = f"{WSL_BASE}/package/libumi-gl.c"
+    gl_dylib = f"{WSL_BASE}/build/libumi-gl.dylib"
     run(f"wsl clang -target arm64-apple-darwin -fuse-ld=lld -ffreestanding -dynamiclib -nostdlib -install_name /redwood/lib/libredwood-gl.dylib -o {gl_dylib} {gl_c}")
     root_fs = Path("C:/MyData/Umi/root_fs")
     if root_fs.exists():
         run(f"wsl cp {gl_dylib} /mnt/c/MyData/Umi/root_fs/lib/libredwood-gl.dylib")
-        print("=== 3c. Repacking root.apfs with RedwoodGL ===")
+        run(f"wsl cp {gl_dylib} /mnt/c/MyData/Umi/root_fs/lib/libumi-gl.dylib")
+        print("=== 3c. Repacking root.apfs with UmiGL ===")
         run(f"wsl python3 {WSL_BASE}/scripts/apfs/mkapfs.py -o /mnt/c/MyData/Umi/root.apfs redwood=/mnt/c/MyData/Umi/root_fs")
 
     print("=== 4. Patching UniXNU kernel.macho ===")
@@ -98,7 +99,7 @@ def main():
 
     print("=== 5. Packaging unixnu_run_payload.bin ===")
     mkpayload = BASE_DIR / "scripts/mkpayload.py"
-    cmdline = "debug=0x8 bootcpu=7 cpus=8 serial=3 rd=md0 loader_return_after=900 epoch=1792750775 sb_delay=8 gpu=1 gl=1 adreno_stream1=0 touchscreen=1 cpufreq=1"
+    cmdline = "debug=0x8 bootcpu=7 cpus=8 serial=3 rd=md0 loader_return_after=900 epoch=1792750775 sb_delay=8 gpu=1 gl=1 metal=1 adreno_stream1=0 touchscreen=1 cpufreq=1"
     run(f'python "{mkpayload}" -o "{PAYLOAD_OUT}" kernel="{KERNEL_OUT}" ramdisk="{ROOT_APFS}" --cmdline "{cmdline}"')
     print("=== BUILD COMPLETE ===")
 
