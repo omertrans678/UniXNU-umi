@@ -98,7 +98,7 @@ def main():
 
     print("=== 5. Packaging unixnu_run_payload.bin ===")
     mkpayload = BASE_DIR / "scripts/mkpayload.py"
-    cmdline = "debug=0x8 bootcpu=7 cpus=8 serial=3 rd=md0 loader_return_after=900 epoch=1792750775 sb_delay=8 gpu=1 adreno_stream1=0 touchscreen=1 cpufreq=1"
+    cmdline = "debug=0x8 bootcpu=7 cpus=8 serial=3 rd=md0 loader_return_after=900 epoch=1792750775 sb_delay=8 gpu=1 gl=1 adreno_stream1=0 touchscreen=1 cpufreq=1"
     run(f'python "{mkpayload}" -o "{PAYLOAD_OUT}" kernel="{KERNEL_OUT}" ramdisk="{ROOT_APFS}" --cmdline "{cmdline}"')
     print("=== BUILD COMPLETE ===")
 
