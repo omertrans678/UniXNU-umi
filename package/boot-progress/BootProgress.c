@@ -542,7 +542,7 @@ void boot_progress_init(void) {
   if (!PE_parse_boot_argn("boot-progress",&opt,sizeof(opt)) || (opt != 1 && opt != 2)) return;
   __asm__ volatile("mrs %0,cntfrq_el0" : "=r"(boot_progress_frequency));
   if (!boot_progress_frequency) return;
-  boot_progress_epoch=ticks(); state.limit=120; state.stall=30;
+  boot_progress_epoch=ticks(); state.limit=600; state.stall=180;
   state.continuous=opt==2; enabled=opt;
   PE_parse_boot_argn("umi-build-tag",build_tag,sizeof(build_tag));build_tag[sizeof(build_tag)-1]=0;
   if (PE_parse_boot_argn("boot-diag-resume",&resume_after,sizeof(resume_after)) && (resume_after<5 || resume_after>3600)) resume_after=0;
@@ -653,8 +653,8 @@ void boot_progress_poll(void) {
     boot_progress_stop_checkpoint();
     // Intentionally retain the complete screen. No reset, storage writes,
     // unsafe MMIO snapshot, panic lock, or resubmission of in-flight I/O.
-    __asm__ volatile("msr daifset,#15\n\tdsb sy" ::: "memory");
-    for (;;) __asm__ volatile("wfe");
+    // NEVER STOP CPU IN WFE FOR LIVE SYSTEMOS BOOT
+    state.frozen = 0;
   }
   release();
 }

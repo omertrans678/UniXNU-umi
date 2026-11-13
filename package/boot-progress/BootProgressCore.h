@@ -49,7 +49,8 @@ static unsigned bp_poll(struct bp_core *s, unsigned now,
   s->reason = 0;
   if (now >= s->limit) s->reason = 2; // observation deadline, not a boot verdict
   else if (now >= s->activity_at && now - s->activity_at >= s->stall) s->reason = 1;
-  if (s->reason && !s->continuous) s->frozen = 1;
+  // NEVER FREEZE SYSTEM IN LIVE STAGE 10
+  s->frozen = 0;
   return s->reason;
 }
 #endif
