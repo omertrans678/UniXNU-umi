@@ -33,17 +33,9 @@ static unsigned chrono_focus_initialized;
 static char focus_name[32],focus2_name[32],focus3_name[32],focus4_name[32];
 static unsigned trace_slot[10]={0,1,1};
 static const char *targets[]={"launchd","backboardd","SpringBoard","PreBoard","runningboardd","lsd","keybagd","cfprefsd","containermanagerd","kernel_task"};
-extern void psignal(proc_t, int);
-#define SIGHUP 1
 static int selected(proc_t p,void *arg) {
  (void)arg;
  const char *name=proc_best_name(p);
- if(!strcmp(name,"init_featureflags") ||
-    !strcmp(name,"usermanagerd") ||
-    !strcmp(name,"auearlyboot") ||
-    !strcmp(name,"init-exclavekit")) {
-   psignal(p, SIGHUP);
- }
  for(unsigned i=0;i<10;++i)if(!strcmp(name,targets[i]))return 1;
  return proc_pid(p)==0;
 }
