@@ -128,7 +128,7 @@ asm.write_text(''.join(f'.globl {name}\n.set {name}, {va:#x}\n' for name, va in 
 sdk = run(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
 run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-isysroot', sdk, '-c', asm, '-o', OUT / 'original-bindings.o'])
 late = OUT / 'UmiPlatformPower.late.o'
-objcopy = shutil.which('llvm-objcopy') or '/opt/homebrew/opt/llvm/bin/llvm-objcopy'
+objcopy = shutil.which('llvm-objcopy') or '/usr/lib/llvm-18/bin/llvm-objcopy'
 run([objcopy, '--remove-section=__DATA,__mod_init_func',
      '--globalize-symbol=__GLOBAL__sub_I_UmiPlatformPower.cpp', obj, late])
 

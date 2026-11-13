@@ -1,0 +1,40 @@
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1394,8 +1394,21 @@
+ 		 * read-only pages and kernel read-only pages, in the event that this gap
+ 		 * exists.
+ 		 */
+-		if ((segPLKDATACONSTB + segSizePLKDATACONST) < segTEXTB) {
+-			arm_vm_page_granular_RWNX(segPLKDATACONSTB + segSizePLKDATACONST, segTEXTB - (segPLKDATACONSTB + segSizePLKDATACONST),
++		vm_offset_t plk_before_text_end = segPLKDATACONSTB + segSizePLKDATACONST;
++		if (segSizePLKTEXTEXEC && (segPLKTEXTEXECB + segSizePLKTEXTEXEC) <= segTEXTB &&
++		    (segPLKTEXTEXECB + segSizePLKTEXTEXEC) > plk_before_text_end) {
++			plk_before_text_end = segPLKTEXTEXECB + segSizePLKTEXTEXEC;
++		}
++		if (segSizePRELINKDATA && (segPRELINKDATAB + segSizePRELINKDATA) <= segTEXTB &&
++		    (segPRELINKDATAB + segSizePRELINKDATA) > plk_before_text_end) {
++			plk_before_text_end = segPRELINKDATAB + segSizePRELINKDATA;
++		}
++		if (segSizePRELINKINFO && (segPRELINKINFOB + segSizePRELINKINFO) <= segTEXTB &&
++		    (segPRELINKINFOB + segSizePRELINKINFO) > plk_before_text_end) {
++			plk_before_text_end = segPRELINKINFOB + segSizePRELINKINFO;
++		}
++		if (plk_before_text_end < segTEXTB) {
++			arm_vm_page_granular_RWNX(plk_before_text_end, segTEXTB - plk_before_text_end,
+ 			    ARM64_GRANULE_ALLOW_BLOCK | ARM64_GRANULE_ALLOW_HINT);
+ 		}
+ 	}
+@@ -2220,9 +2233,10 @@
+ 		vm_kernel_slid_top = vm_slinkedit;
+ 	} else {
+ 		assert(segDATACONSTB == segTEXTB + segSizeTEXT);
+-		assert(segTEXTEXECB == segDATACONSTB + segSizeDATACONST);
+-		vm_kernel_etext = segTEXTB + segSizeTEXT + segSizeDATACONST + segSizeTEXTEXEC;
+-		vm_kernel_slid_top = vm_prelink_einfo;
++		assert(segTEXTEXECB == segDATACONSTB + segSizeDATACONST ||
++		    segTEXTEXECB == segDATAB + segSizeDATA);
++		vm_kernel_etext = segTEXTEXECB + segSizeTEXTEXEC;
++		vm_kernel_slid_top = (vm_prelink_einfo > vm_elinkedit) ? vm_prelink_einfo : vm_elinkedit;
+ 	}
+ 
+ 	dynamic_memory_begin = ROUND_TWIG(dynamic_memory_begin);

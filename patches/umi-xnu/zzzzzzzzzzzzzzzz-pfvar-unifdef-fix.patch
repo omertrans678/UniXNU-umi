@@ -1,0 +1,13 @@
+diff --git a/bsd/net/pfvar.h b/bsd/net/pfvar.h
+index 920426d..871847f 100644
+--- a/bsd/net/pfvar.h
++++ b/bsd/net/pfvar.h
+@@ -2416,7 +2416,7 @@ __private_extern__ struct pf_fragment_tag * pf_copy_fragment_tag(struct mbuf *,
+ #define PF_COMPATIBLE_FLAGS_CUSTOM_RULES_PRESENT 0x00000004
+ 
+ __private_extern__ uint32_t pf_check_compatible_rules(void);
+-#endif // SKYWALK && defined(XNU_TARGET_OS_OSX)
++#endif /* SKYWALK && defined(XNU_TARGET_OS_OSX) */
+ #else /* !KERNEL */
+ extern struct pf_anchor_global pf_anchors;
+ extern struct pf_anchor pf_main_anchor;

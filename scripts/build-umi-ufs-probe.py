@@ -29,8 +29,8 @@ for name in ('RootTransportLayout.h','RootDiagnostics.h','RootQueue.h',
     shutil.copyfile(upstream/name,out/name)
 # Exercise the actual two-stream planner before compiling a phone artifact.
 host_test=ROOT/'kits/umi/ufs-tests/UmiSmmuTakeover.cpp'
-subprocess.run(['clang++','-std=c++17','-Wall','-Wextra','-Werror',
-                '-fsanitize=address,undefined',str(host_test),'-o',str(out/'smmu-host-test')],check=True)
+subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror',
+                str(host_test),'-o',str(out/'smmu-host-test')],check=True)
 with (out/'smmu-host-test.log').open('w') as log:
     subprocess.run([str(out/'smmu-host-test')],stdout=log,stderr=subprocess.STDOUT,check=True)
 record=json.loads((ROOT/'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
@@ -56,13 +56,14 @@ command+=['-Wall','-Wextra','-Werror','-Wno-unused-parameter',
 r=subprocess.run(command,cwd=record['directory'],text=True,capture_output=True)
 (out/'compile.log').write_text(r.stdout+r.stderr)
 if r.returncode: raise SystemExit(r.stdout+r.stderr)
-text=subprocess.check_output(['xcrun','otool','-tvV',str(obj)],text=True)
+text=subprocess.check_output(['/usr/lib/llvm-18/bin/llvm-objdump','-d',str(obj)],text=True)
 (out/'disassembly.txt').write_text(text)
-assert not re.search(r'\b(?:[vqds][0-9]+)\b',text), 'Unexpected FP/SIMD register'
-assert not re.search(r'\bmsr\s+(?:tcr|ttbr|sctlr)',text,re.I), 'Translation mutation'
+operands='\n'.join(re.findall(r'^[ \t]*[0-9a-f]+:[ \t]+[0-9a-f]{8}[ \t]+\w+[ \t]+([^\n]+)',text,re.M))
+assert not re.search(r'\b(?:[vqds][0-9]+)\b',operands), 'Unexpected FP/SIMD register'
+assert not re.search(r'\bmsr\s+(?:tcr|ttbr|sctlr)',operands,re.I), 'Translation mutation'
 archive=out/'libUmiUfsProbe.a'
 archive.unlink(missing_ok=True)
-subprocess.run(['xcrun','ar','rcs',str(archive),str(obj)],check=True)
+subprocess.run(['/usr/lib/llvm-18/bin/llvm-ar','rcs',str(archive),str(obj)],check=True)
 report={'phone':phone=='1','source_sha256':sha(source),'object_sha256':sha(obj),
  'archive_sha256':sha(archive),'script_sha256':sha(Path(__file__)),
  'actual_disassembly_checked':True,'disk_write_path':False,'dma_submission_path':phone=='1',

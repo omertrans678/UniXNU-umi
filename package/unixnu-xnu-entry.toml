@@ -18,7 +18,7 @@ id = "xnu"
 title = "Boot XNU entry trace"
 type = "xnu"
 path = "Payloads/kernel.macho"
-args = "-v keepsyms=1 kt_fixed_zones=120"
+args = "-v keepsyms=1 kt_fixed_zones=120 boot-progress=2"
 
 [[entry]]
 id = "reset"

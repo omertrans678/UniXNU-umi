@@ -125,7 +125,8 @@ def make_payload(output_dir=None, diagnostic="payload"):
                     raise ValueError("Root UUID requires the verified image policy")
                 for name in ("darwinboot-memory-size", "root-matching"):
                     changed_properties[name] = chosen.get(name)
-                chosen["darwinboot-memory-size"] = u64(owned)
+                # Stage 10 full Apple userspace requires 1024 MiB (1 GiB) window
+                chosen["darwinboot-memory-size"] = u64(1024 << 20)
                 chosen["root-matching"] = string(
                     "<dict><key>IOProviderClass</key><string>IOMedia</string>"
                     "<key>IOPropertyMatch</key><dict><key>UUID</key><string>"

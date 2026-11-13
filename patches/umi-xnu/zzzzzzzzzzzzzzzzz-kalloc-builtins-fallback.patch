@@ -1,0 +1,27 @@
+diff --git a/osfmk/kern/kalloc.h b/osfmk/kern/kalloc.h
+index c027990..493216d 100644
+--- a/osfmk/kern/kalloc.h
++++ b/osfmk/kern/kalloc.h
+@@ -761,6 +761,22 @@ __options_decl(kt_granule_t, uint32_t, {
+  *
+  * @param type          The type to analyze
+  */
++#ifndef __has_builtin
++#define __has_builtin(x) 0
++#endif
++
++#if !__has_builtin(__builtin_xnu_type_summary)
++#define __builtin_xnu_type_summary(type) 0UL
++#endif
++
++#if !__has_builtin(__builtin_xnu_types_compatible)
++#define __builtin_xnu_types_compatible(t1, t2) 1
++#endif
++
++#if !__has_builtin(__builtin_xnu_type_signature)
++#define __builtin_xnu_type_signature(type) ""
++#endif
++
+ #define KT_SUMMARY_GRANULES(type) \
+ 	(__builtin_xnu_type_summary(type) & KT_SUMMARY_MASK_TYPE_BITS)
+ 

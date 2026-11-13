@@ -96,7 +96,7 @@ if args.component == "ArmCpu":
         if not re.search(pattern, disassembly):
             raise SystemExit(f"Missing actual instruction sequence: {pattern}")
     if args.gic_diagnostics and not re.search(
-        r"\bmrs\s+x\d+, DAIF\n[^\n]*\bmsr\s+DAIFSet, #0x3", disassembly
+        r"\bmrs\s+x\d+, DAIF\n[^\n]*\bmsr\s+DAIFSet, #(?:0x)?3\b", disassembly
     ):
         raise SystemExit("Observer did not actually mask IRQ/FIQ")
 archive = out / ("lib" + args.component + ".a")

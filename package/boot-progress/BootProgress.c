@@ -71,6 +71,11 @@ extern volatile uint32_t native_ufs_integrity_failures __attribute__((weak_impor
 extern volatile uint32_t native_ufs_probe_calls __attribute__((weak_import)), native_ufs_matched __attribute__((weak_import));
 extern volatile uint32_t native_ufs_root_step __attribute__((weak_import));
 extern const char *volatile native_ufs_root_failure __attribute__((weak_import));
+extern volatile uint32_t native_ufs_root_magic0 __attribute__((weak_import));
+extern volatile uint32_t native_ufs_root_magic1 __attribute__((weak_import));
+extern volatile uint32_t native_ufs_root_manifest __attribute__((weak_import));
+extern volatile uint32_t native_ufs_root_ext4_magic __attribute__((weak_import));
+extern volatile uint32_t native_ufs_root_ext4_blocks __attribute__((weak_import));
 extern volatile uint32_t native_virtio_ready __attribute__((weak_import)), native_virtio_read_requests __attribute__((weak_import)), native_virtio_read_failures __attribute__((weak_import));
 extern volatile uint64_t native_virtio_verified_blocks __attribute__((weak_import));
 extern void native_ufs_progress_text(char *, size_t) __attribute__((weak_import));
@@ -216,8 +221,8 @@ static void draw(unsigned now) {
   if(&native_ufs_root_step && !BP_OPTIONAL(native_ufs_blocks_published)) {
     // Nothing published yet: how far the root start got (probe calls, match, step, last soft-failure reason).
     size_t n=strlen(b);const char *why=native_ufs_root_failure;
-    snprintf(b+n,sizeof(b)-n," | probe=%u match=%u root=%u %.40s",native_ufs_probe_calls,native_ufs_matched,
-      native_ufs_root_step,why?why:"-");
+    snprintf(b+n,sizeof(b)-n," | r=%u st=%u mg=%08x %.25s",
+      native_ufs_root_step,&native_ufs_root_manifest?native_ufs_root_manifest:99,&native_ufs_root_magic0?native_ufs_root_magic0:0,why?why:"-");
   }
   line(2,b,0xffffffff);
   snprintf(b,sizeof(b),"TCR=%llx TTBR0=%llx TTBR1=%llx SCTLR=%llx",tcr,ttbr0,ttbr1,sctlr); line(3,b,0xffffffff);
@@ -436,6 +441,17 @@ static void draw(unsigned now) {
     snprintf(b,sizeof(b),"UFS TIME verify=%llu ms read=%llu ms verified=%llu blocks (%llu MiB) requests=%llu",
       vt*1000/freq,rt*1000/freq,blocks,blocks*4096>>20,__atomic_load_n(&native_ufs_block_reads,__ATOMIC_RELAXED));
     line(46,b,0xffffaa00);
+  }
+  if(&native_ufs_root_step) {
+    snprintf(b,sizeof(b),"UFS ROOT: r=%u st=%u mg0=%08x mg1=%08x ext4=%04x blk=%u %.25s",
+      native_ufs_root_step,
+      &native_ufs_root_manifest ? native_ufs_root_manifest : 99,
+      &native_ufs_root_magic0 ? native_ufs_root_magic0 : 0,
+      &native_ufs_root_magic1 ? native_ufs_root_magic1 : 0,
+      &native_ufs_root_ext4_magic ? native_ufs_root_ext4_magic : 0,
+      &native_ufs_root_ext4_blocks ? native_ufs_root_ext4_blocks : 0,
+      native_ufs_root_failure ? native_ufs_root_failure : "-");
+    line(47,b,0xff00ffff);
   }
   snprintf(b,sizeof(b),"MEM totalMiB=%llu free4K=%u active=%u inactive=%u wired=%u speculative=%u",
     max_mem>>20,vm_page_free_count,vm_page_active_count,vm_page_inactive_count,

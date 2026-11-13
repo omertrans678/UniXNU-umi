@@ -50,7 +50,7 @@ def main():
         subprocess.run(command, cwd=r["directory"], check=True, timeout=90)
         commands[name] = command
         asm = subprocess.check_output(
-            ["/opt/homebrew/opt/llvm/bin/llvm-objdump", "-d", obj], text=True)
+            ["/usr/lib/llvm-18/bin/llvm-objdump", "-d", obj], text=True)
         operands = "\n".join(re.findall(
             r"^[ \t]*[0-9a-f]+:[ \t]+[0-9a-f]{8}[ \t]+\w+[ \t]+([^\n]+)", asm, re.M))
         if re.search(r"\b(?:[qds][0-9]+|v[0-9]+(?:\.[0-9a-z]+)?)\b", operands):
@@ -139,7 +139,7 @@ def main():
     # Inspect final objects too, after optional views have been compiled.
     for obj in objects:
         asm = subprocess.check_output(
-            ["/opt/homebrew/opt/llvm/bin/llvm-objdump", "-d", obj], text=True)
+            ["/usr/lib/llvm-18/bin/llvm-objdump", "-d", obj], text=True)
         operands = "\n".join(re.findall(
             r"^[ \t]*[0-9a-f]+:[ \t]+[0-9a-f]{8}[ \t]+\w+[ \t]+([^\n]+)", asm, re.M))
         if re.search(r"\b(?:[qds][0-9]+|v[0-9]+(?:\.[0-9a-z]+)?)\b", operands):

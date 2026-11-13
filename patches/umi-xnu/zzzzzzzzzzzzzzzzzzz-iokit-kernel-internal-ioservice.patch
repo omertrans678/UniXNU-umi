@@ -1,0 +1,15 @@
+diff --git a/iokit/Kernel/IOKitKernelInternal.h b/iokit/Kernel/IOKitKernelInternal.h
+index 1111111..2222222 100644
+--- a/iokit/Kernel/IOKitKernelInternal.h
++++ b/iokit/Kernel/IOKitKernelInternal.h
+@@ -94,6 +94,10 @@ extern void bcopy_phys(addr64_t from, addr64_t to, vm_size_t size);
+ 
+ __END_DECLS
+ 
++#ifdef __cplusplus
++#include <IOKit/IOService.h>
++#endif
++
+ #define __IODEQUALIFY(type, expr)                               \
+    ({ typeof(expr) expr_ = (type)(uintptr_t)(expr);             \
+        (type)(uintptr_t)(expr_); })

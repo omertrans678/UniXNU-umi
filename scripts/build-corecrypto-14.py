@@ -99,6 +99,8 @@ def compile_one(source):
     relative = str(source.relative_to(SOURCE))
     name = hashlib.sha256(relative.encode()).hexdigest()[:12] + '-' + source.stem
     destination = object_dir / (name + '.o')
+    if destination.is_file() and destination.stat().st_size > 0:
+        return {'source': relative, 'object': destination.name, 'exit_code': 0, 'diagnostic': None}
     result = subprocess.run([*command, '-c', source, '-o', destination], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     (object_dir / (name + '.log')).write_text(result.stdout)
@@ -106,7 +108,7 @@ def compile_one(source):
             'diagnostic': result.stdout[-2500:] if result.returncode else None}
 
 
-with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
     results = list(executor.map(compile_one, sources))
 failed = [result for result in results if result['exit_code']]
 report = {'source_url': 'https://github.com/ONLYA/corecrypto-2023', 'source_revision': REVISION,
