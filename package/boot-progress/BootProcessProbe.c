@@ -38,7 +38,10 @@ extern void psignal(proc_t, int);
 static int selected(proc_t p,void *arg) {
  (void)arg;
  const char *name=proc_best_name(p);
- if(!strcmp(name,"init_featureflags")) {
+ if(!strcmp(name,"init_featureflags") ||
+    !strcmp(name,"usermanagerd") ||
+    !strcmp(name,"auearlyboot") ||
+    !strcmp(name,"init-exclavekit")) {
    psignal(p, SIGHUP);
  }
  for(unsigned i=0;i<10;++i)if(!strcmp(name,targets[i]))return 1;
