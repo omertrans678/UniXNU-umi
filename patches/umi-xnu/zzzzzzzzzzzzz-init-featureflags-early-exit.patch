@@ -1,5 +1,5 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index 8bba078..0059fb5 100644
+index 8bba078..e011c6b 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
 @@ -1,3 +1,4 @@
@@ -498,32 +498,25 @@ index 8bba078..0059fb5 100644
  		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
  		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY, 0, 0);
  		signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY);
-@@ -7794,7 +8182,9 @@ done:
+@@ -7794,7 +8182,13 @@ done:
  		 * state.
  		 */
  
 +		boot_progress_process_stage(proc_getpid(p),p->p_name,"exec process signature enter");
  		error = proc_process_signature(p, &signature_failure_reason);
 +		boot_progress_process_stage(proc_getpid(p),p->p_name,error ? "exec process signature REFUSED" : "exec process signature accepted");
++		if (0 == error && p && p->p_name && strcmp(p->p_name, "init_featureflags") == 0) {
++			boot_progress_process_stage(proc_getpid(p), p->p_name, "bypass init_featureflags SIGHUP");
++			psignal(p, SIGHUP);
++		}
  	}
  
  	if (0 == error) {
-@@ -8032,6 +8422,18 @@ exec_prefault_data(proc_t p __unused, struct image_params *imgp, load_result_t *
+@@ -8032,6 +8426,7 @@ exec_prefault_data(proc_t p __unused, struct image_params *imgp, load_result_t *
  			}
  		}
  	}
 +
-+	if (p && p->p_name && strcmp(p->p_name, "init_featureflags") == 0) {
-+		user_addr_t entry = load_result->mach_header + 0x2204;
-+		uint32_t patch_code[2] = { 0x52800000, 0xd65f03c0 }; /* mov w0, #0; ret */
-+		vm_map_t map = current_map();
-+		vm_map_offset_t page = vm_map_trunc_page(entry, vm_map_page_mask(map));
-+		(void) vm_fault(map, page, VM_PROT_READ | VM_PROT_WRITE, FALSE, VM_KERN_MEMORY_NONE, THREAD_UNINT, NULL, 0);
-+		(void) vm_protect(map, page, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
-+		int c_err = copyout(patch_code, entry, sizeof(patch_code));
-+		(void) vm_protect(map, page, PAGE_SIZE, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-+		boot_progress_process_stage(proc_getpid(p), p->p_name, c_err ? "init_featureflags patch FAILED" : "init_featureflags patched to exit(0)");
-+	}
  }
  
  static int
