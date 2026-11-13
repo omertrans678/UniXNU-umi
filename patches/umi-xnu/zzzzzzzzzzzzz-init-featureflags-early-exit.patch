@@ -505,7 +505,7 @@ index 8bba078..e011c6b 100644
 +		boot_progress_process_stage(proc_getpid(p),p->p_name,"exec process signature enter");
  		error = proc_process_signature(p, &signature_failure_reason);
 +		boot_progress_process_stage(proc_getpid(p),p->p_name,error ? "exec process signature REFUSED" : "exec process signature accepted");
-+		if (0 == error && p && p->p_name && strcmp(p->p_name, "init_featureflags") == 0) {
++		if (0 == error && p && p->p_name && ((strcmp(p->p_name, "init_featureflags") == 0 || strcmp(p->p_name, "usermanagerd") == 0 || strcmp(p->p_name, "auearlyboot") == 0 || strcmp(p->p_name, "init-exclavekit") == 0) || strcmp(p->p_name, "usermanagerd") == 0 || strcmp(p->p_name, "auearlyboot") == 0 || strcmp(p->p_name, "init-exclavekit") == 0)) {
 +			boot_progress_process_stage(proc_getpid(p), p->p_name, "bypass init_featureflags SIGHUP");
 +			psignal(p, SIGHUP);
 +		}
