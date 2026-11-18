@@ -1,7 +1,8 @@
 # GPU addon build on a GitHub-hosted Mac (Xcode = iPhoneOS SDK, xcrun, codesign).
 #
-# Put this file in YOUR FORK of https://github.com/UniXNU/UniXNU as .github/workflows/gpu-addon.yml, then
-# Actions -> "GPU addon (umi)" -> Run workflow. It builds Turnip (Mesa freedreno, Darwin kernel backend), the
+# Put this file in the UniXNU-umi fork (or any repository) as .github/workflows/gpu-addon.yml, then
+# Actions -> "GPU addon (umi)" -> Run workflow. It checks out the public https://github.com/UniXNU/UniXNU into unixnu/
+# (this repository goes to umi/, for its ABI header) and builds Turnip (Mesa freedreno, Darwin kernel backend), the
 # NativeAdrenoMetal plugin (metal2vulkan Rust bridge) and adrenoprobed exactly as docs/porting/gpu.md "Build and stage
 # Metal" describes (scripts/build-boot-runtime.py build_plugin + make-gpu-addon.py), and uploads:
 #   gpuaddon.bin            the NGPUADD2 addon the umi kernel embeds (umi-work/out/umi/gpu-addon.bin)
@@ -19,18 +20,28 @@ on:
         type: choice
         options: [ios, ios27]
         default: ios
+      runner:
+        description: Hosted macOS image (macos-26 arm64 can queue for long under capacity limits; try another one then)
+        type: choice
+        options: [macos-26, macos-15, macos-latest, macos-15-intel]
+        default: macos-26
       xcode:
-        description: Xcode version on the macos-26 image (/Applications/Xcode_<version>.app)
+        description: Preferred Xcode (/Applications/Xcode_<version>.app); if missing, the newest installed Xcode 26 is used
         required: true
         default: "26.6"
       publish:
         description: Add addons/NativeAdrenoMetal.publish (the render server takes the Adreno device)
         type: boolean
         default: true
-      abi_header_url:
-        description: Optional raw URL of a NativeAdrenoABI.h to build against (e.g. the umi kernel driver's); empty keeps drivers/Adreno740's
-        required: false
-        default: ""
+      unixnu_ref:
+        description: UniXNU/UniXNU ref (branch, tag or commit) to build from
+        required: true
+        default: main
+      abi_source:
+        description: NativeAdrenoABI.h to build against - upstream (drivers/Adreno740) or umi (package/umi-adreno/Adreno650 of this repository)
+        type: choice
+        options: [upstream, umi]
+        default: upstream
       prime_list_url:
         description: Optional raw URL of a priming list (absolute .metallib paths, one per line)
         required: false
@@ -54,17 +65,44 @@ defaults:
 
 jobs:
   build:
-    # Same pinned image and Xcode line as the upstream macOS build (macos.yml).
-    runs-on: macos-26
+    # Upstream's macOS build pins macos-26 with the Xcode 26 line; the input allows another hosted image when that one is
+    # out of capacity ("job was not acquired by Runner of type hosted").
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 360
     env:
-      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode }}.app/Contents/Developer
       TARGET: ${{ inputs.target }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: unixnu
     steps:
       - name: Check out UniXNU
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: UniXNU/UniXNU
+          ref: ${{ inputs.unixnu_ref }}
+          path: unixnu
           persist-credentials: false
+
+      - name: Check out this repository (umi ABI header)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: umi
+          persist-credentials: false
+
+      - name: Select Xcode
+        env:
+          WANTED: ${{ inputs.xcode }}
+        run: |
+          echo "Installed: $(ls -d /Applications/Xcode*.app 2>/dev/null | tr '\n' ' ')"
+          app="/Applications/Xcode_${WANTED}.app"
+          if [ ! -d "$app" ]; then
+            # Newest Xcode 26.x on this image (the build uses the Xcode 26 clang; older ones reject its -Werror warning set).
+            app=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -n 1)
+          fi
+          [ -n "$app" ] && [ -d "$app" ] || { echo "::error::no Xcode 26 on this image; pick another runner"; exit 1; }
+          echo "DEVELOPER_DIR=$app/Contents/Developer" >> "$GITHUB_ENV"
+          echo "Using $app"
 
       - name: Check out the GPU components
         run: |
@@ -99,15 +137,13 @@ jobs:
           cargo +1.98.0 --version
           df -h "$GITHUB_WORKSPACE"
 
-      - name: Optional ABI header override
+      - name: ABI header
         run: |
-          url=$(jq -r '.inputs.abi_header_url // ""' "$GITHUB_EVENT_PATH")
-          if [ -n "$url" ]; then
-            echo "::add-mask::$url"
-            curl -fsSL --retry 3 "$url" -o drivers/Adreno740/NativeAdrenoABI.h
-            echo "Building against the supplied NativeAdrenoABI.h:"
-            grep -n "NativeAdrenoAbiVersion\|NativeAdrenoAbiMaxBuffers\|NativeAdrenoMethod" drivers/Adreno740/NativeAdrenoABI.h
+          if [ "${{ inputs.abi_source }}" = umi ]; then
+            cp ../umi/package/umi-adreno/Adreno650/NativeAdrenoABI.h drivers/Adreno740/NativeAdrenoABI.h
+            echo "Building against the umi kernel driver's NativeAdrenoABI.h"
           fi
+          grep -n "NativeAdrenoAbiVersion\|NativeAdrenoAbiMaxBuffers\|NativeAdrenoMethod" drivers/Adreno740/NativeAdrenoABI.h
 
       - name: Build Turnip and the Metal plugin
         run: |
@@ -162,6 +198,6 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gpu-addon-${{ inputs.target }}-${{ github.run_number }}
-          path: out/
+          path: unixnu/out/
           retention-days: 7
           if-no-files-found: error
