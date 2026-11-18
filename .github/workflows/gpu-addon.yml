@@ -111,6 +111,35 @@ jobs:
           git -C drivers/Adreno740 rev-parse HEAD
           git -C drivers/AdrenoMetal rev-parse HEAD
 
+      - name: Patch the translator for iOS (umi)
+        run: |
+          # metal2vulkan 46e7cc96 defines copied.rs read_pages (mach_vm_read_overwrite of the own task) for macOS, Linux and
+          # Windows only, so the runtime fails on aarch64-apple-ios (E0425 read_pages). The macOS body is the same Mach call on
+          # iOS: widen its cfg. Recorded as one more bridge patch, so the bridge script's pin + patch checks still hold.
+          patch=drivers/AdrenoMetal/bridge/patches/0099-umi-ios-read-pages.patch
+          cat > "$patch" <<'EOF'
+          diff --git a/crates/metal2vulkan-runtime/src/copied.rs b/crates/metal2vulkan-runtime/src/copied.rs
+          --- a/crates/metal2vulkan-runtime/src/copied.rs
+          +++ b/crates/metal2vulkan-runtime/src/copied.rs
+          @@ -2643,3 +2643,3 @@
+           /// [`read_pages`] on macOS.
+          -#[cfg(target_os = "macos")]
+          +#[cfg(any(target_os = "macos", target_os = "ios"))]
+           pub(crate) fn read_pages(pages: NonNull<u8>, into: &mut [u8]) -> bool {
+          EOF
+          python3 - <<'PY'
+          from pathlib import Path
+          script = Path('scripts/build-adreno-metal-bridge.py')
+          text = script.read_text()
+          anchor = "for name in ["
+          if '0099-umi-ios-read-pages.patch' not in text:
+              head, sep, rest = text.partition(anchor)
+              body, close, tail = rest.partition(']]')
+              assert sep and close, 'PATCHES list not found in build-adreno-metal-bridge.py'
+              script.write_text(head + sep + body.rstrip() + ",\n    '0099-umi-ios-read-pages.patch'" + close + tail)
+          PY
+          grep -n -A4 "^PATCHES" scripts/build-adreno-metal-bridge.py
+
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
