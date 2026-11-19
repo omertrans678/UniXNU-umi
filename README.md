@@ -2,11 +2,11 @@
 
 English | [简体中文](README.zh-CN.md)
 
-An independent UniXNU device port for **Xiaomi Mi 10 (`umi`, SM8250)**. The tested
-12 GiB / 256 GB handset reaches **iPadOS 17.7.11 Hello / Setup Assistant**.
-Physical ST FTS touch under XNU was confirmed working by the device owner in
-attempt 80. Setup completion and the home screen remain unverified. This is a
-development source snapshot, not a ready-to-install release.
+An independent UniXNU device port for **Xiaomi Mi 10 (`umi`, SM8250, Adreno 650)**.
+The tested 12 GiB / 256 GB handset boots **iPadOS 17.7.11 (21H461)** to the
+**SpringBoard home screen** with Setup skipped, with GPU-accelerated Metal,
+direct display scanout and working touch. This is a development source
+snapshot, not a ready-to-install release.
 
 | Repository | Role |
 | --- | --- |
@@ -14,72 +14,82 @@ development source snapshot, not a ready-to-install release.
 | [uefi-umi](https://github.com/reAAAq/uefi-umi) | Mu-Silicium firmware port, derived from uefi-sheng |
 | [UniXNU](https://github.com/UniXNU/UniXNU) | Upstream build driver, loader, generic drivers and patches |
 
-## Hardware status
+## Scope and status
 
-Status reflects the tested handset through attempt 80 (2026-10-23).
+Status of the tested handset at build `umi-192` (2026-11-19).
 
 | Feature | State | Evidence / limitation |
 | --- | --- | --- |
 | UEFI menu and RAM payload | Working | Menu, file verification and DarwinBoot handoff |
-| Volume selection / power confirmation | Working in UEFI | Restart action also verified; not an iOS button claim |
-| XNU and SMP | Working | Eight CPUs online; per-core timer and IPI activity recorded |
-| UFS / OS / SystemOS | Working for startup | Root and cryptex mounted; launchd and system services run |
-| Writable Data | Working for startup | Persistent store across reboots on the test partition layout |
-| Display | Working | Apple logo and Hello/Setup via CPU copies to inherited scanout |
-| ST FTS touch | Working under XNU | Device owner confirmed usable physical touch in attempt 80; UEFI menu touch is not qualified |
-| GPU acceleration | Not implemented | CPU presentation only |
-| Wi-Fi, Bluetooth, cellular, audio, camera, sensors | Not implemented / not qualified | No complete driver validation |
+| XNU and SMP | Working | Eight CPUs; big clusters raised to their top level (`umi-cpufreq=4`), no DCVS yet |
+| UFS / OS / SystemOS | Working | Root and cryptex mounted; concurrent reads on UTRD slots 2..16 |
+| Writable Data | Working | Persistent store with read-ahead; file systems synced before the `umi-ar` reset |
+| SpringBoard | Working | Setup skipped (`umi-skip-setup=1`); 4 GiB OS memory window |
+| GPU / Metal | Working | Adreno 650 driver (`package/umi-adreno`), table mode 2, hang recovery verified |
+| Display | Working | Direct DPU scanout (`dpu-scanout=2`), BGRA8 composition (ADT gamut sRGB) |
+| ST FTS touch | Working | Unlock, taps and gestures; unknown events are skipped instead of stopping the driver |
+| Two-ring GPU preemption | Off | Switches work, but animations show black tile dots (`gpu-preempt` left unset) |
+| Shader cache warm-up | Not done | Needs macOS |
+| Wi-Fi, Bluetooth, cellular, audio, camera, sensors | Not implemented | |
 | USB under XNU, battery, suspend/resume | Not qualified | Recovery ADB is separate from XNU USB support |
 
-[Validation summary](docs/validation.json) contains selected non-identifying
-measurements and artifact hashes. Original device dumps and console logs remain
-local. Attempt 80 enables the native always-on PM8150B GPIO5 board rail before
-FTS startup, after the preceding run recorded the pin output-low. The owner
-confirmed working touch after this change. The runtime coordinate/HID counts
-for attempt 80 have not yet been collected; prior zero-event traces are historical.
+Known issues: lsd sometimes rebuilds the LaunchServices store at boot and holds
+SpringBoard at the Apple logo for that boot; app launches are still slower than
+on the donor. [Validation summary](docs/validation.json) keeps selected
+non-identifying measurements. Original device dumps and logs stay local.
 
-## Sources and build
+## Prerequisites
 
-Follow [BUILD.md](docs/BUILD.md) for pins, workspace setup, host checks and the
-remaining build-input requirements. `source-lock.json` pins the tested framework
-and firmware, and `feeds.toml` / `unixnu.lock` pin public source dependencies.
-The default `board.toml` and `umi_defconfig` remain the minimal source-only
-baseline. The full phone profile is assembled by the tools under `bringup/`.
-A plain generic build is not equivalent to the tested Hello image.
+- A Linux or WSL2 host with the [Linux toolchain](https://unixnu.com/guide/requirements#linux);
+  macOS for Data-seed tools and the shader cache.
+- The donor inputs: **iPad7,1 / iPadOS 17.7.11 / 21H461 / j120ap**, source kernel
+  **XNU 10063.141.1 / Darwin 23.6.0** (`ipsw-inputs.json`). No Apple or vendor
+  binary inputs are included; the generated GPU firmware source is git-ignored.
+- A device with TWRP recovery and a backup of every partition. The install
+  replaces Android userdata; there is no general installer here.
+- Pinned sources: `source-lock.json`, `feeds.toml`, `unixnu.lock`.
 
-Donor: **iPad7,1 / iPadOS 17.7.11 / 21H461 / j120ap**. Source kernel:
-**XNU 10063.141.1 / Darwin 23.6.0**. The donor's binary kernel is a different
-version, recorded in `ipsw-inputs.json`. No Apple or vendor binary inputs are
-included in this repository.
+## Build
+
+Workspace setup, pins and host checks are in [BUILD.md](docs/BUILD.md). The
+phone profile is assembled by the tools under `bringup/`:
+
+```bash
+python3 tools/build_umi_native_ufs.py --profile phone && python3 tools/build_stage10_pipeline.py
+```
+
+Run it from the build workspace (`umi-work/`, where `devices/umi` points to this
+repository). The output is `out/umi/boot/umi-xnu-stage10-systemos-boot.img`;
+flash it from TWRP to `boot` only after a `SUCCESS: Stage 10 Boot Image` line.
+The GPU library alone builds with `scripts/build-umi-adreno.py`. Kernel
+arguments live in `package/unixnu-xnu-prelink.toml` and must stay under about
+960 characters; keep `umi-ar` (auto-reset to recovery) set.
+
+## Required reading
+
+- [Port a device](https://unixnu.com/porting/steps) and
+  [device repository](https://unixnu.com/porting/device-repository)
+- [UFS storage](https://unixnu.com/porting/ufs), [display](https://unixnu.com/porting/display),
+  [input](https://unixnu.com/porting/input), [GPU and Metal](https://unixnu.com/porting/gpu)
+- [Data volume](https://unixnu.com/guide/userdata#data-volume),
+  [Skip Setup](https://unixnu.com/guide/skip-setup), [Building](https://unixnu.com/building)
+- [Log capture](https://unixnu.com/porting/log-capture) and
+  [porting records](https://unixnu.com/porting/records)
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
 | `board.toml`, `configs/`, `feeds.toml` | Board description and source baseline |
-| `scripts/`, `patches/` | ADT generation, kernel builds and platform/diagnostic patches |
-| `package/` | PMGR service, UFS/SMMU, persistent Data, display, diagnostics and ST FTS/HID |
+| `scripts/`, `patches/` | ADT generation, kernel and GPU library builds, platform/diagnostic patches |
+| `package/` | PMGR, UFS/SMMU, persistent Data, display, diagnostics, ST FTS/HID |
+| `package/umi-adreno/` | Adreno 650 driver, GMU/SMMU kits and the board bring-up |
 | `overlay/`, `menu/` | Firmware/menu staging sources used by the development builder |
 | `bringup/tools/`, `bringup/tests/` | Host build, decoding and fault-injection tools |
-| `docs/` | Build limitations and current hardware observation summary |
+| `docs/` | Build notes, touch audit and validation summary |
 
-The UEFI repository contains the staged inherited-display/buttons/RAM-payload
-profile. `overlay/` is the input template used to regenerate that profile; they
-are deliberately not byte-identical. Firmware staging may update the UEFI tree.
-
-## Current work
-
-The ST FTM5 path uses native GPI DMA I²C, the three-reset startup sequence,
-read-only factory identity acquisition and HID confidence/collection dispatch.
-The board-boost fix is in [138d6cb](https://github.com/reAAAq/UniXNU-umi/commit/138d6cb).
-[Native driver audit](docs/TOUCH_NATIVE_AUDIT.md) records the source comparison
-and test history. Multi-touch, suspend/resume and completing setup still need
-separate validation; working XNU touch does not qualify UEFI touch.
-
-The board geometry and high-memory window were measured on one handset. Do not
-reuse them on a different model or RAM/storage variant without revalidation.
-The tested installation replaces Android userdata; there is no general installer
-or partition-write tool in this repository. Preserve Recovery and backups.
+The board geometry and memory window were measured on one handset. Do not reuse
+them on a different model or RAM/storage variant without revalidation.
 
 ## Credits and license
 
@@ -93,4 +103,4 @@ of the UniXNU organization.
 ### Project Credits & Provenance
 - **UniXNU Base:** [UniXNU](https://github.com/UniXNU/UniXNU)
 - **Upstream Mi 10 Port & Attempt 80 Touch Baseline:** [reAAAq](https://github.com/reAAAq) ([UniXNU-umi](https://github.com/reAAAq/UniXNU-umi))
-- **Standalone ST FTS521 Touch Integration & Hardware Verification:** [omertrans678](https://github.com/omertrans678) ([UniXNU-umi](https://github.com/omertrans678/UniXNU-umi))
+- **Standalone ST FTS521 Touch Integration, GPU, Display and Storage Bring-up & Hardware Verification:** [omertrans678](https://github.com/omertrans678) ([UniXNU-umi](https://github.com/omertrans678/UniXNU-umi))

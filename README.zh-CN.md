@@ -2,67 +2,101 @@
 
 [English](README.md) | 简体中文
 
-面向 **小米 10（`umi` / SM8250）** 的独立 UniXNU 移植。已在一台
-**12 GiB 内存 / 256 GB 存储**的手机上进入 **iPadOS 17.7.11 Hello／设置向导**。
-第 80 版已由机主确认 XNU 下 ST FTS 触摸可用，尚未验证完成设置和进入桌面。
-本仓库发布开发源码，不提供可直接安装的发行镜像。
+面向 **小米 10（`umi` / SM8250 / Adreno 650）** 的独立 UniXNU 移植。已在一台
+**12 GiB 内存 / 256 GB 存储**的手机上启动 **iPadOS 17.7.11（21H461）**，跳过设置
+后进入 **SpringBoard 主屏幕**，并具备 GPU 加速的 Metal、显示直接扫描输出和可用的
+触摸。本仓库发布开发源码，不提供可直接安装的发行镜像。
 
 | 仓库 | 用途 |
 | --- | --- |
 | [UniXNU-umi](https://github.com/reAAAq/UniXNU-umi) | 板级配置、XNU 接入、驱动、诊断和主机工具 |
-| [uefi-umi](https://github.com/reAAAq/uefi-umi) | 从 uefi-sheng 派生的 Mu-Silicium 固件移植 |
-| [UniXNU](https://github.com/UniXNU/UniXNU) | 上游构建器、加载器、通用驱动和补丁 |
+| [uefi-umi](https://github.com/reAAAq/uefi-umi) | Mu-Silicium 固件移植，派生自 uefi-sheng |
+| [UniXNU](https://github.com/UniXNU/UniXNU) | 上游构建驱动、加载器、通用驱动和补丁 |
 
-## 当前状态
+## 范围与状态
 
-截至 2026-10-23 的第 80 轮，以下结论仅针对已测试手机。
+以下为测试机在构建 `umi-192`（2026-11-19）时的状态。
 
-| 功能 | 状态与范围 |
+| 功能 | 状态 | 证据 / 限制 |
+| --- | --- | --- |
+| UEFI 菜单和 RAM 载荷 | 可用 | 菜单、文件校验和 DarwinBoot 交接 |
+| XNU 与 SMP | 可用 | 八个 CPU；大核集群提升到最高档（`umi-cpufreq=4`），尚无 DCVS |
+| UFS / OS / SystemOS | 可用 | 根卷和 cryptex 已挂载；UTRD 槽 2..16 并发读取 |
+| 可写 Data | 可用 | 带预读的持久存储；`umi-ar` 复位前同步文件系统 |
+| SpringBoard | 可用 | 跳过设置（`umi-skip-setup=1`）；系统内存窗口 4 GiB |
+| GPU / Metal | 可用 | Adreno 650 驱动（`package/umi-adreno`），页表模式 2，已验证挂起恢复 |
+| 显示 | 可用 | DPU 直接扫描输出（`dpu-scanout=2`），BGRA8 合成（ADT 色域 sRGB） |
+| ST FTS 触摸 | 可用 | 解锁、点击和手势；未知事件被跳过，不再停止驱动 |
+| 双环 GPU 抢占 | 关闭 | 切换可用，但动画中出现黑色方块（未设置 `gpu-preempt`） |
+| 着色器缓存预热 | 未完成 | 需要 macOS |
+| Wi-Fi、蓝牙、蜂窝、音频、相机、传感器 | 未实现 | |
+| XNU 下的 USB、电池、休眠/唤醒 | 未验证 | Recovery ADB 与 XNU USB 支持无关 |
+
+已知问题：lsd 有时会在启动时重建 LaunchServices 存储，该次启动会停在 Apple
+标志；应用启动仍比供体设备慢。[验证摘要](docs/validation.json) 保存部分不含身份
+信息的测量值。原始设备转储和日志仅保存在本地。
+
+## 前置条件
+
+- Linux 或 WSL2 主机，并安装 [Linux 工具链](https://unixnu.com/guide/requirements#linux)；
+  Data 种子工具和着色器缓存需要 macOS。
+- 供体输入：**iPad7,1 / iPadOS 17.7.11 / 21H461 / j120ap**，源码内核
+  **XNU 10063.141.1 / Darwin 23.6.0**（`ipsw-inputs.json`）。本仓库不含 Apple 或厂商
+  二进制输入；生成的 GPU 固件源文件已被 git 忽略。
+- 装有 TWRP Recovery 并已备份所有分区的设备。安装会替换 Android userdata；
+  此处没有通用安装器。
+- 固定的源码版本：`source-lock.json`、`feeds.toml`、`unixnu.lock`。
+
+## 构建
+
+工作区准备、版本固定和主机检查见 [BUILD.md](docs/BUILD.md)。手机配置由
+`bringup/` 下的工具组装：
+
+```bash
+python3 tools/build_umi_native_ufs.py --profile phone && python3 tools/build_stage10_pipeline.py
+```
+
+在构建工作区（`umi-work/`，其中 `devices/umi` 指向本仓库）中运行。输出为
+`out/umi/boot/umi-xnu-stage10-systemos-boot.img`；只有出现
+`SUCCESS: Stage 10 Boot Image` 后才在 TWRP 中写入 `boot`。单独构建 GPU 库使用
+`scripts/build-umi-adreno.py`。内核参数位于 `package/unixnu-xnu-prelink.toml`，
+长度须保持在约 960 个字符以内；保留 `umi-ar`（自动复位到 Recovery）。
+
+## 必读文档
+
+- [移植设备](https://unixnu.com/porting/steps) 和
+  [设备仓库](https://unixnu.com/porting/device-repository)
+- [UFS 存储](https://unixnu.com/porting/ufs)、[显示](https://unixnu.com/porting/display)、
+  [输入](https://unixnu.com/porting/input)、[GPU 与 Metal](https://unixnu.com/porting/gpu)
+- [Data 卷](https://unixnu.com/guide/userdata#data-volume)、
+  [跳过设置](https://unixnu.com/guide/skip-setup)、[构建](https://unixnu.com/building)
+- [日志采集](https://unixnu.com/porting/log-capture) 和
+  [移植记录](https://unixnu.com/porting/records)
+
+## 目录结构
+
+| 路径 | 内容 |
 | --- | --- |
-| UEFI 菜单、RAM 负载、DarwinBoot | 已验证菜单、文件读取和内核交接 |
-| 音量选择、电源确认、Restart | UEFI 中可用；不代表 iOS 实体键已适配 |
-| XNU、多核、中断、定时器 | 已记录 8 核在线及各核 timer / IPI 活动 |
-| UFS、OS、SystemOS | 已挂载并执行 launchd 和后续系统服务 |
-| 可写 Data | 测试布局下已持久化并跨重启使用 |
-| 显示 | 苹果 Logo 和 Hello／设置向导；CPU 复制到继承显存 |
-| ST FTS 触摸 | XNU 下可用；第 80 版机主已确认真实触摸有效，UEFI 菜单触摸未验证 |
-| GPU 加速 | 未实现 |
-| Wi-Fi、蓝牙、蜂窝、音频、相机、传感器 | 未实现或未完成验证 |
-| XNU USB、电池管理、休眠唤醒 | 未验证；Recovery ADB 不等于 XNU USB 可用 |
+| `board.toml`、`configs/`、`feeds.toml` | 板级描述和源码基线 |
+| `scripts/`、`patches/` | ADT 生成、内核和 GPU 库构建、平台/诊断补丁 |
+| `package/` | PMGR、UFS/SMMU、持久 Data、显示、诊断、ST FTS/HID |
+| `package/umi-adreno/` | Adreno 650 驱动、GMU/SMMU 组件和板级启动 |
+| `overlay/`、`menu/` | 开发构建器使用的固件/菜单暂存源 |
+| `bringup/tools/`、`bringup/tests/` | 主机构建、解码和故障注入工具 |
+| `docs/` | 构建说明、触摸审计和验证摘要 |
 
-[验证摘要](docs/validation.json)记录去除设备标识后的关键数值和产物哈希。
-原始设备转储和控制台日志保留在本地。前一版记录到 PM8150B GPIO5 输出低，
-第 80 版按原生配置在 FTS 启动前启用这一路常开电源，之后机主确认触摸有效。
-本轮坐标／HID 计数尚未采集；此前零事件日志保留为历史记录。
-
-## 构建与目录
-
-[BUILD.md](docs/BUILD.md)列出了固定版本、工作区组装、主机校验及尚需本地准备的输入。
-`source-lock.json` 固定已验证框架与固件版本；`feeds.toml` 和 `unixnu.lock` 固定公开源码依赖。
-`board.toml`／`umi_defconfig` 仍是最小源码基线，完整 Hello 配置由 `bringup/` 工具组装，
-不能将默认通用构建视为完整系统镜像。
-
-系统输入为 **iPad7,1 / 17.7.11 / 21H461 / j120ap**；源码内核为
-**XNU 10063.141.1 / Darwin 23.6.0**，与 IPSW 内二进制内核版本不同。
-Apple 组件、厂商固件、Data 种子和设备转储均不包含在仓库中。
-
-- `scripts/`、`patches/`：ADT、构建及内核适配。
-- `package/`：PMGR 服务、UFS/SMMU、Data、显示、诊断及 ST FTS/HID。
-- `overlay/`、`menu/`：固件和菜单的生成输入；固件仓库保留已组装的继承显示、实体键和 RAM 负载配置。
-- `bringup/tools/`、`bringup/tests/`：主机构建、日志解码和故障注入检查。
-- `docs/`：当前验证结果和构建限制。
-
-完整系统构建仍依赖本地生成的 ABI、策略、镜像身份和硬件采集记录，尚不是干净克隆后的一键安装流程。
-当前触控已接入 GPI DMA I²C、三次 GPIO 复位、只读模组身份读取及 HID 有效位／集合派发。
-常开电源修复见 [138d6cb](https://github.com/reAAAq/UniXNU-umi/commit/138d6cb)，
-源码对照和测试过程见[原生驱动审计](docs/TOUCH_NATIVE_AUDIT.md)。
-多点触控、休眠唤醒和完成设置仍需单独验证；XNU 触摸可用不代表 UEFI 触摸可用。
-
-分区范围与高位内存窗口只在当前容量配置上测量过，其他机型或容量必须重新核对。
-测试安装替换了 Android userdata；本仓库不提供通用刷机脚本，请保留 Recovery 和备份。
+板级几何参数和内存窗口仅在一台手机上测得。用于其他型号或其他内存/存储版本前，
+必须重新验证。
 
 ## 致谢与许可
 
-基于 UniXNU、UniXNU-sheng、Mu-Silicium，以及公开的 Xiaomi／LineageOS SM8250 资料。
-原有逐文件许可和 `upstream.json` 来源信息均保留，见 [NOTICE.md](NOTICE.md) 与 [LICENSE](LICENSE)。
-维护者为 [reAAAq](https://github.com/reAAAq)，本项目由社区独立维护。
+基于 [UniXNU](https://github.com/UniXNU/UniXNU)、
+[UniXNU-sheng](https://github.com/UniXNU/UniXNU-sheng)、Mu-Silicium 以及公开的
+小米/LineageOS SM8250 硬件资料。原有的逐文件声明和 `upstream.json` 来源信息保持
+不变。见 [NOTICE.md](NOTICE.md) 和 [LICENSE](LICENSE)。由
+[reAAAq](https://github.com/reAAAq) 维护，独立于 UniXNU 组织。
+
+### 项目致谢与来源
+- **UniXNU 基础：** [UniXNU](https://github.com/UniXNU/UniXNU)
+- **上游小米 10 移植与第 80 版触摸基线：** [reAAAq](https://github.com/reAAAq)（[UniXNU-umi](https://github.com/reAAAq/UniXNU-umi)）
+- **独立 ST FTS521 触摸集成、GPU、显示与存储启动及硬件验证：** [omertrans678](https://github.com/omertrans678)（[UniXNU-umi](https://github.com/omertrans678/UniXNU-umi)）
