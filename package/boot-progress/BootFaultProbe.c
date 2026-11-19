@@ -166,3 +166,78 @@ void boot_progress_exit_reason(int pid,unsigned signal,char *out,unsigned long c
  }
  __atomic_store_n(&reason_busy,0,__ATOMIC_RELEASE);
 }
+
+// TRAP-DETAIL (kernel-only): a process that died of SIGTRAP (brk) usually left its reason in a __crash_info section
+// (os_crash, Swift fatalError: crashreporter_annotations_t.message/message2), as a crash report shows it. Walk the dyld image
+// list of the exiting process (the calling thread owns the map) and copy the first message; also the 8 instructions before
+// the trapping PC and the image that holds it.
+struct umi_cr_annotations { uint64_t version, message, signature_string, backtrace, message2, thread, dialog_mode, abort_cause; };
+struct umi_mh64 { uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved; };
+struct umi_seg64 { uint32_t cmd, cmdsize; char segname[16]; uint64_t vmaddr, vmsize, fileoff, filesize; uint32_t maxprot, initprot, nsects, flags; };
+struct umi_sect64 { char sectname[16], segname[16]; uint64_t addr, size; uint32_t offset, align, reloff, nreloc, flags, r1, r2, r3; };
+#define TRAP_LC 32768
+static char trap_lc[TRAP_LC];
+static volatile int trap_busy;
+// Returns 1 when a message was found; *text_lo/text_hi get the image's slid __TEXT range.
+static int trap_image(uint64_t load, char *msg, unsigned long cap, uint64_t *text_lo, uint64_t *text_hi) {
+ struct umi_mh64 mh;
+ if(copyin(load,&mh,sizeof(mh)) || mh.magic!=0xfeedfacf || mh.sizeofcmds>TRAP_LC)return 0;
+ if(copyin(load+sizeof(mh),trap_lc,mh.sizeofcmds))return 0;
+ uint64_t text=0,crash=0;int have_text=0;
+ for(unsigned i=0,at=0;i<mh.ncmds && at+8<=mh.sizeofcmds;++i) {
+  const struct umi_seg64 *seg=(const struct umi_seg64 *)(trap_lc+at);
+  if(seg->cmdsize<8 || at+seg->cmdsize>mh.sizeofcmds)break;
+  if(seg->cmd==0x19 && seg->cmdsize>=sizeof(*seg)) {
+   if(!strncmp(seg->segname,"__TEXT",16)){text=seg->vmaddr;have_text=1;*text_hi=seg->vmsize;}
+   const struct umi_sect64 *s=(const struct umi_sect64 *)(seg+1);
+   for(unsigned k=0;k<seg->nsects && (const char *)(s+k+1)<=trap_lc+at+seg->cmdsize;++k)
+    if(!strncmp(s[k].sectname,"__crash_info",16))crash=s[k].addr;
+  }
+  at+=seg->cmdsize;
+ }
+ if(!have_text)return 0;
+ uint64_t slide=load-text;*text_lo=load;*text_hi+=load;
+ if(!crash)return 0;
+ struct umi_cr_annotations a;
+ if(copyin(crash+slide,&a,sizeof(a)) || (!a.message && !a.message2))return 0;
+ unsigned long copied=0,n=0;msg[0]=0;
+ if(a.message && !copyinstr(a.message,msg,cap,&copied))n=strlen(msg);
+ if(a.message2 && n+4<cap){msg[n++]=' ';msg[n++]='|';msg[n++]=' ';msg[n]=0;
+  if(copyinstr(a.message2,msg+n,cap-n,&copied))msg[n]=0;}
+ for(unsigned i=0;msg[i];++i)if((unsigned char)msg[i]<32 || (unsigned char)msg[i]>126)msg[i]='?';
+ return msg[0]!=0;
+}
+void boot_progress_trap_detail(int pid,char *out,unsigned long capacity) {
+ if(!capacity)return;
+ out[0]=0;
+ if(pid!=proc_selfpid() || __atomic_exchange_n(&trap_busy,1,__ATOMIC_ACQUIRE))return;
+ struct boot_fault_record f={0};
+ if(!__atomic_exchange_n(&fault_lock,1,__ATOMIC_ACQUIRE)) {
+  for(unsigned n=0;n<8 && n<fault_count;++n){struct boot_fault_record *c=&faults[(fault_count-1-n)%8];if(c->valid && c->pid==pid){f=*c;break;}}
+  __atomic_store_n(&fault_lock,0,__ATOMIC_RELEASE);
+ }
+ struct user64_dyld_all_image_infos info={0};
+ static char msg[1400];char where[96]={0};msg[0]=0;
+ unsigned images=0;int found=0;
+ if(!copyin(task_get_all_image_info_addr(current_task()),&info,sizeof(info)) && info.infoArray) {
+  char spare[8];
+  for(unsigned i=0;i<info.infoArrayCount && i<600 && !(found && (where[0] || !f.valid));++i) {
+   struct user64_dyld_image_info im;
+   if(copyin(info.infoArray+(uint64_t)i*sizeof(im),&im,sizeof(im)))break;
+   ++images;
+   uint64_t lo=0,hi=0;
+   if(trap_image(im.imageLoadAddress,found?spare:msg,found?sizeof(spare):sizeof(msg),&lo,&hi))found=1;
+   if(f.valid && !where[0] && f.pc>=lo && f.pc<hi) {
+    char path[72]={0};unsigned long c=0;
+    if(copyinstr(im.imageFilePath,path,sizeof(path),&c))path[0]=0;
+    size_t l=strlen(path);
+    snprintf(where,sizeof(where),"%s+%llx",l>40?path+l-40:path,(unsigned long long)(f.pc-lo));
+   }
+  }
+ }
+ uint32_t insn[9]={0};
+ int ierr=f.valid?copyin(f.pc-32,insn,sizeof(insn)):-1;
+ snprintf(out,capacity,"msg[%s] img %s n%u x0=%llx x1=%llx x8=%llx insn%d %x %x %x %x %x %x %x %x [%x]",msg,where[0]?where:"?",images,
+  f.x[0],f.x[1],f.x[8],ierr,insn[0],insn[1],insn[2],insn[3],insn[4],insn[5],insn[6],insn[7],insn[8]);
+ __atomic_store_n(&trap_busy,0,__ATOMIC_RELEASE);
+}

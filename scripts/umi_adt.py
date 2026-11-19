@@ -154,7 +154,7 @@ def apply_ipad_profile(tree):
         "product-name": string("iPad Pro (12.9-inch) (2nd generation)"),
         "product-description": string("iPad Pro (12.9-inch) (2nd generation)"),
         "artwork-device-idiom": string("pad"), "artwork-device-subtype": u32(2732),
-        "artwork-scale-factor": u32(2), "artwork-display-gamut": string("P3"),
+        "artwork-scale-factor": u32(2), "artwork-display-gamut": string("sRGB"),   # umi-147: BGRA8 composition for DPU direct scanout (unixnu.com/porting/display; gts7xlwifi record)
         "compatible-device-fallback": string("iPad6,7"), "thin-bezel": u32(1),
     })
     tree.at("/chosen").properties.update({

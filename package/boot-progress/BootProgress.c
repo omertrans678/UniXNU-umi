@@ -24,8 +24,37 @@ extern int proc_selfpid(void);
 #include "BootProgressDisplay.h"
 #include "BootProgressPulse.h"
 #include "BootProgressLifecycle.h"
+#include "UmiReset.h"
+#include "UmiBootLog.h"
 static struct bp_exits exit_records,exit_snapshot;
 static unsigned exit_lock,exit_dropped;
+// Per-name exit tally (under exit_lock): which processes keep exiting, how, and the last status/reason.
+struct bp_exit_tally{char name[32];unsigned n,bad,crash,status,ns;uint64_t code;};
+static struct bp_exit_tally exit_tally[48];
+extern const char *umi_xpcproxy_label(int pid);   /* kern_exec.c: service label of an xpcproxy pid */
+extern int umi_xp_trace_format(int pid,char *out,size_t len);   /* sleh.c: last syscalls of an xpcproxy pid */
+// Syscall traces of failed xpcproxy runs: chronod (slot 0) and the first 5 other distinct services.
+static char xp_trace[6][520];
+static char xp_trace_label[6][32];
+static unsigned exit_tally_other;
+static void exit_tally_add(int pid,const char *name,int status,unsigned ns,uint64_t code) {
+  unsigned i=0,signal=(unsigned)status&127;
+  char key[32];
+  const char *label=(status||ns) && name && !strcmp(name,"xpcproxy")?umi_xpcproxy_label(pid):NULL;
+  if(label){
+    if(!strncmp(label,"com.apple.",10))label+=10;
+    snprintf(key,sizeof(key),"x:%s",label);name=key;
+    unsigned s=!strcmp(label,"chronod")?0:6;
+    if(s==6)for(unsigned j=1;j<6;++j){if(!strcmp(xp_trace_label[j],label)){s=7;break;}if(!xp_trace_label[j][0]){s=j;break;}}
+    if(s<6 && !xp_trace[s][0] && umi_xp_trace_format(pid,xp_trace[s],sizeof(xp_trace[s])))strlcpy(xp_trace_label[s],label,sizeof(xp_trace_label[s]));
+  }
+  for(;i<48 && exit_tally[i].name[0];++i)if(!strncmp(exit_tally[i].name,name?name:"?",sizeof(exit_tally[i].name)-1))break;
+  if(i==48){++exit_tally_other;return;}
+  struct bp_exit_tally *t=&exit_tally[i];
+  if(!t->name[0])strlcpy(t->name,name?name:"?",sizeof(t->name));
+  ++t->n;t->bad+=(status||ns)!=0;t->crash+=signal>=3 && signal<=12 && signal!=9;
+  t->status=(unsigned)status;t->ns=ns;t->code=code;
+}
 extern void umi_user_start(void);
 extern void umi_user_exit_observe(int,const char *,int,unsigned,uint64_t,const char *);
 
@@ -86,6 +115,9 @@ extern volatile uint32_t native_ram_block_sparse __attribute__((weak_import));
 extern volatile uint64_t native_ram_block_bytes,native_ram_block_resident_bytes __attribute__((weak_import));
 extern unsigned int vm_page_free_min,vm_page_free_reserved,vm_page_free_target;
 extern void boot_progress_exit_fault(int,unsigned,char *,unsigned long) __attribute__((weak_import));
+extern void boot_progress_trap_detail(int,char *,unsigned long) __attribute__((weak_import));
+// SIGTRAP reasons (BootFaultProbe.c trap detail) for the first 3 distinct process names.
+static char trap_rows[3][1700];
 extern void boot_progress_exit_reason(int,unsigned,char *,unsigned long) __attribute__((weak_import));
 extern void boot_ui_trace_snapshot(unsigned) __attribute__((weak_import));
 extern char boot_ui_trace_rows[14][120] __attribute__((weak_import));
@@ -96,7 +128,42 @@ extern volatile unsigned boot_ui_trace_index __attribute__((weak_import));
 extern void boot_process_capture(void) __attribute__((weak_import));
 extern void boot_process_snapshot(void) __attribute__((weak_import));
 extern char boot_process_rows[10][120] __attribute__((weak_import));
+extern char boot_process_bt_rows[10][2048] __attribute__((weak_import));
+extern char boot_process_hist_rows[8][120] __attribute__((weak_import));
+extern volatile unsigned boot_process_hist_count __attribute__((weak_import));
+/* sleh.c per-task profile of the backboardd task (see umi_sys_profile). */
+extern volatile uint32_t umi_sys_hist_cnt[560];
+extern volatile uint64_t umi_sys_hist_ticks[560];
+extern volatile uint64_t umi_target_fault_cnt, umi_target_fault_ticks;
+static void umi_sys_profile_dump(void) {
+  char b[200];
+  uint64_t total=0;uint32_t calls=0;
+  for(unsigned i=0;i<560;++i){total+=umi_sys_hist_ticks[i];calls+=umi_sys_hist_cnt[i];}
+  snprintf(b,sizeof(b),"lsd syscalls %u %llums | faults %llu %llums",calls,(unsigned long long)(total/19200ull),
+    (unsigned long long)umi_target_fault_cnt,(unsigned long long)(umi_target_fault_ticks/19200ull));
+  umi_boot_log_line("SYSPROF",b);
+  bool used[560]={0};
+  for(unsigned k=0;k<12;++k) {
+    unsigned best=560;uint64_t bt=0;
+    for(unsigned i=0;i<560;++i)if(!used[i] && umi_sys_hist_ticks[i]>bt){bt=umi_sys_hist_ticks[i];best=i;}
+    if(best==560)break;
+    used[best]=true;
+    snprintf(b,sizeof(b),"%s%u c%u t%llums",best>=512?"mach-":"",best>=512?best-512:best,umi_sys_hist_cnt[best],
+      (unsigned long long)(bt/19200ull));
+    umi_boot_log_line("SYSPROF",b);
+  }
+}
 extern char native_touch_rows[4][120] __attribute__((weak_import));
+struct mount; struct vfs_context;
+extern int vfs_iterate(int flags,int (*callout)(struct mount *,void *),void *arg);
+extern int VFS_SYNC(struct mount *mp,int flags,struct vfs_context *ctx);
+extern int vfs_isrdonly(struct mount *mp);
+extern struct vfs_context *vfs_context_kernel(void);
+/* umi-164: a waited sync of every writable mount (sync(2) itself only schedules: MNT_NOWAIT). MNT_WAIT is 1 (sys/mount.h). */
+static int umi_sync_one(struct mount *mp,void *arg){
+  if(!vfs_isrdonly(mp)){int e=VFS_SYNC(mp,1,vfs_context_kernel());if(e)++*(unsigned *)arg;else ++((unsigned *)arg)[1];}
+  return 0;
+}
 extern char native_cpufreq_row[120] __attribute__((weak_import));
 extern volatile uint32_t native_hid_input_events[8] __attribute__((weak_import));
 extern volatile int native_hid_input_results[8] __attribute__((weak_import));
@@ -106,11 +173,37 @@ extern volatile int native_touch_xs[12],native_touch_ys[12],native_touch_ids[12]
 extern char *debug_buf_base __attribute__((weak_import));
 extern unsigned int kernel_debugger_entry_count __attribute__((weak_import));
 extern volatile uint32_t native_cpufreq_stage __attribute__((weak_import));
+extern void umi_cpufreq_probe(void) __attribute__((weak_import));
+extern void umi_cpufreq_late(void) __attribute__((weak_import));
+extern volatile unsigned umi_adreno_spawn_count;   /* kern_exec.c: IOMFB_FDR_Loader -> adrenoprobed */
+extern volatile int umi_adreno_spawn_error;
+extern volatile int umi_adreno_fail_stage, umi_adreno_fail_error;
+extern volatile int umi_skip_setup_status;   /* BootWatchdogPolicy.c: -1 not requested, else errno */
+extern volatile int umi_mg_cache_removed;   /* BootWatchdogPolicy.c: MobileGestalt cache files removed */
+extern volatile int umi_keychain_moved;   /* BootWatchdogPolicy.c: 0 moved aside, else errno */
+extern volatile int umi_data_ark_status;   /* BootWatchdogPolicy.c: mobileactivationd data ark seed, 0 or errno */
+extern char umi_exec_fail_rows[24][112];   /* kern_exec.c: distinct failing exec paths */
+extern unsigned umi_exec_fail_hits[24];
+extern volatile unsigned umi_exec_fail_count, umi_exec_fail_other;
 extern volatile unsigned native_touch_stage_req __attribute__((weak_import));
 extern volatile unsigned boot_process_passes,boot_process_seen __attribute__((weak_import));
 extern volatile unsigned boot_process_attempts __attribute__((weak_import));
 extern volatile unsigned boot_process_busy __attribute__((weak_import));
 static unsigned process_worker_status,process_capture_age;
+extern volatile uint32_t native_p1_unix_cnt __attribute__((weak_import));
+extern volatile uint64_t native_p1_max_ticks __attribute__((weak_import)), native_p1_total_ticks __attribute__((weak_import));
+extern volatile int32_t native_p1_max_sys __attribute__((weak_import));
+extern int native_ufs_link_info(uint32_t *out, unsigned count) __attribute__((weak_import));
+extern volatile uint64_t native_ufs_cache_hits __attribute__((weak_import)), native_ufs_cache_fills __attribute__((weak_import));
+extern volatile uint64_t native_ufs_store_cache[4] __attribute__((weak_import));
+extern volatile uint64_t native_ufs_fast[8] __attribute__((weak_import));
+/* umi-185: sleh.c's lsd file trace */
+struct umi_lsd_rec { int16_t sys; int16_t err; uint32_t seq; char path[200]; };
+extern struct umi_lsd_rec native_p1_lsd_first[64] __attribute__((weak_import)), native_p1_lsd_last[16] __attribute__((weak_import));
+extern volatile uint32_t native_p1_lsd_seq __attribute__((weak_import));
+extern volatile uint32_t native_ufs_fast_err[4] __attribute__((weak_import));
+extern volatile uint64_t native_ufs_cache_bypass __attribute__((weak_import));
+extern volatile uint64_t native_ufs_cache_fast __attribute__((weak_import)), native_ufs_cache_fast_blocks __attribute__((weak_import));
 extern volatile uint32_t __attribute__((weak_import)) armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr;
 extern volatile uint32_t __attribute__((weak_import)) armcpu_smp_step[8],armcpu_smp_seen_mpidr[8],armcpu_smp_fail[8],armcpu_smp_sys[8][5],armcpu_boot_sys[5],armcpu_gic_stride,armcpu_gic_typer_probe[2];
 extern volatile int32_t __attribute__((weak_import)) armcpu_smp_psci_rc[8];
@@ -575,6 +668,7 @@ void boot_progress_bind(uintptr_t base,unsigned w,unsigned h,unsigned rb,unsigne
   umi_boot_progress_record(2);
 }
 void boot_progress_putc(char c) {
+  umi_boot_log_putc(c);
   if (!enabled || !take()) return;
   bp_char(&state,c);
   unsigned now=seconds();
@@ -582,6 +676,7 @@ void boot_progress_putc(char c) {
   release();
 }
 void boot_progress_stage(const char *text) {
+  umi_boot_log_line("STAGE", text);
   if (!enabled || !take()) return;
   unsigned now=seconds();
   char stamped[BP_COLS], name[32]={0};
@@ -608,18 +703,89 @@ void boot_progress_exit(int pid,const char *name,int status,unsigned ns,uint64_t
     __atomic_fetch_add(&exit_dropped,1,__ATOMIC_RELAXED);return;
   }
   bp_exit_add(&exit_records,pid,name,status,ns,code);
+  exit_tally_add(pid,name,status,ns,code);
   unsigned signal=(unsigned)status&127;
   if(signal>=3 && signal<=12 && signal!=9 && boot_progress_exit_fault)
     boot_progress_exit_fault(pid,signal,exit_records.crash[(exit_records.crashes-1)%3],400);
+  if(signal==5 && boot_progress_trap_detail) {
+    unsigned s=3;
+    for(unsigned j=0;j<3;++j){if(trap_rows[j][0] && !strncmp(trap_rows[j],name?name:"?",strlen(name?name:"?"))){s=4;break;}if(!trap_rows[j][0]){s=j;break;}}
+    if(s<3){static char tb[1600];boot_progress_trap_detail(pid,tb,sizeof(tb));if(tb[0])snprintf(trap_rows[s],sizeof(trap_rows[s]),"%s %s",name?name:"?",tb);}
+  }
   if(signal==6 && boot_progress_exit_reason)boot_progress_exit_reason(pid,signal,exit_records.reason,sizeof(exit_records.reason));
   umi_user_exit_observe(pid,name,status,ns,code,signal==6?exit_records.reason:"");
   __atomic_store_n(&exit_lock,0,__ATOMIC_RELEASE);
 }
+void boot_progress_emergency_banner(const char *tag, uint64_t a, uint64_t b) {
+  if (tag && tag[0] == 'P') umi_boot_log_record_panic(a, b, NULL);
+  uintptr_t f = __atomic_load_n(&display.frame, __ATOMIC_RELAXED);
+  unsigned w = __atomic_load_n(&display.width, __ATOMIC_RELAXED);
+  unsigned h = __atomic_load_n(&display.height, __ATOMIC_RELAXED);
+  unsigned s = __atomic_load_n(&display.stride, __ATOMIC_RELAXED);
+  if (!f || !display.bound || w < 200 || h < 200) return;
+  char msg[BP_COLS];
+  snprintf(msg, sizeof(msg), " EMERGENCY [%s] a=%llx b=%llx t=%us",
+    tag ? tag : "?", (unsigned long long)a, (unsigned long long)b, seconds());
+  bp_line_bg(&display, 0, msg, 0xffffffffU, 0xffcc0000U);
+  for (unsigned y = h - 80; y < h - 48; ++y) {
+    volatile uint32_t *row = (volatile uint32_t *)(f + (uintptr_t)y * s);
+    for (unsigned x = w - 160; x < w - 128; ++x) row[x] = 0xffff0000U;
+  }
+}
+void boot_progress_emergency_text(const char *text) {
+  umi_boot_log_record_panic(0, 0, text);
+  uintptr_t f = __atomic_load_n(&display.frame, __ATOMIC_RELAXED);
+  unsigned w = __atomic_load_n(&display.width, __ATOMIC_RELAXED);
+  unsigned h = __atomic_load_n(&display.height, __ATOMIC_RELAXED);
+  if (!f || !display.bound || w < 200 || h < 200 || !text || !text[0]) return;
+  const char *p = text;
+  const unsigned pad = 16;
+  const unsigned max_chars = (BP_COLS - 1 > pad + 68) ? 68 : (BP_COLS - 1 - pad);
+  for (unsigned row = 1; row <= 4 && *p; ++row) {
+    char line[BP_COLS];
+    unsigned n = 0;
+    while (n < pad) line[n++] = ' ';
+    unsigned count = 0;
+    while (count < max_chars && *p && *p != '\n' && *p != '\r') {
+      line[n++] = *p++;
+      ++count;
+    }
+    line[n] = 0;
+    while (*p == '\n' || *p == '\r') ++p;
+    bp_line_bg(&display, row, line, 0xffffffffU, 0xffcc0000U);
+  }
+}
+void boot_progress_hw_heartbeat(int cpu) {
+  uintptr_t f = __atomic_load_n(&display.frame, __ATOMIC_RELAXED);
+  unsigned w = __atomic_load_n(&display.width, __ATOMIC_RELAXED);
+  unsigned h = __atomic_load_n(&display.height, __ATOMIC_RELAXED);
+  unsigned s = __atomic_load_n(&display.stride, __ATOMIC_RELAXED);
+  if (!enabled || !display.bound || !f || w < 160 || h < 160 || cpu != 7) return;
+  uint64_t cnt = ticks();
+  uint32_t col = ((uint32_t)(cnt >> 21) & 1U) ? 0xff00ff00U : 0xffff00ffU;
+  for (unsigned y = h - 80; y < h - 48; ++y) {
+    volatile uint32_t *row = (volatile uint32_t *)(f + (uintptr_t)y * s);
+    for (unsigned x = w - 64; x < w - 32; ++x) row[x] = col;
+  }
+}
 void boot_progress_irq(uint64_t pc,uint64_t psr,uint64_t sp) {
-  // Independent of the recorder lock. IRQ still performs no pixel stores.
+  // Independent of the recorder lock.
   if(enabled) {
-    __atomic_fetch_add(&irq_entries,1,__ATOMIC_RELAXED);
+    uint64_t n = __atomic_add_fetch(&irq_entries,1,__ATOMIC_RELAXED);
     __atomic_store_n(&irq_entry_pc,pc,__ATOMIC_RELAXED);
+    if ((n & 127ULL) == 0ULL && display.bound) {
+      uintptr_t f = __atomic_load_n(&display.frame, __ATOMIC_RELAXED);
+      unsigned w = __atomic_load_n(&display.width, __ATOMIC_RELAXED);
+      unsigned h = __atomic_load_n(&display.height, __ATOMIC_RELAXED);
+      unsigned s = __atomic_load_n(&display.stride, __ATOMIC_RELAXED);
+      if (f && w >= 160 && h >= 160) {
+        uint32_t col = ((uint32_t)(n >> 7) & 1U) ? 0xffffff00U : 0xff00ffffU;
+        for (unsigned y = h - 80; y < h - 48; ++y) {
+          volatile uint32_t *row = (volatile uint32_t *)(f + (uintptr_t)y * s);
+          for (unsigned x = w - 112; x < w - 80; ++x) row[x] = col;
+        }
+      }
+    }
   }
   if (!enabled || state.frozen || !take()) return;
   ++irq_count;last_pc=pc;last_psr=psr;last_sp=sp;boot_progress_last_pc=pc;
@@ -989,9 +1155,11 @@ static void touch_monitor(void *arg, wait_result_t result) {
   }
 }
 #include "UmiRuntimeTrace.h"
+#include "UmiGpuProbe.h"
 static void monitor(void *arg, wait_result_t result) {
   (void)arg;(void)result;
-  unsigned capture_at=0,capture_attempt=~0U,named=0;
+  unsigned capture_at=0,capture_attempt=~0U,named=0,auto_rec=0;
+  PE_parse_boot_argn("umi-ar",&auto_rec,sizeof(auto_rec));
   for (;;) {
     __atomic_fetch_add(&thread_count,1,__ATOMIC_RELAXED);
     boot_progress_poll();
@@ -1007,14 +1175,150 @@ static void monitor(void *arg, wait_result_t result) {
     }
     refresh(seconds());
     umi_runtime_trace_poll(now);
-    if(thread_count==1)umi_boot_progress_record(4);
-    if(thread_count==3){umi_boot_progress_record(5);umi_boot_progress_checkpoint_three();}
+    if(thread_count==1){umi_boot_progress_record(4);if(umi_cpufreq_probe)umi_cpufreq_probe();}
+    if(thread_count==3){umi_boot_progress_record(5);umi_boot_progress_checkpoint_three();umi_gpu_probe();}
     if(thread_count==8){umi_boot_progress_record(6);umi_boot_progress_checkpoint_eight();}
+    if(auto_rec && now>=auto_rec){
+      umi_boot_log_line("AUTO","umi-auto-recovery triggered");
+      // umi-164: the reset below is a hard one; lsd's memory-mapped LaunchServices store and APFS's dirty buffers were lost
+      // with it, so the next boots rebuilt the store (lsd ~400k syscalls, SpringBoard held at the Apple logo). Flush every
+      // mounted file system first (the kernel's own power-management sync, bounded by sync_timeout); the Data overlay
+      // itself is write-through.
+      {
+        uint64_t t0=mach_absolute_time();
+        unsigned counts[2]={0,0};
+        int se=vfs_iterate(0,umi_sync_one,counts);
+        char sb[80];snprintf(sb,sizeof(sb),"vfs %d failed%u synced%u %llums",se,counts[0],counts[1],(unsigned long long)((mach_absolute_time()-t0)/19200ull));
+        umi_boot_log_line("SYNC",sb);
+      }
+      // Persist the last complete process pass (launchd/backboardd/SpringBoard/...: threads,
+      // run/wait counts, wait event, user PC) so a reset log shows whether the UI stack is alive.
+      if(&boot_process_rows) {
+        if(boot_process_snapshot)boot_process_snapshot();
+        for(unsigned i=0;i<10;++i)if(boot_process_rows[i][0])umi_boot_log_line("PROC",boot_process_rows[i]);
+        if(&boot_process_bt_rows)
+          for(unsigned i=0;i<10;++i)if(boot_process_bt_rows[i][0])umi_boot_log_line("PROCBT",boot_process_bt_rows[i]);
+        if(&boot_process_hist_rows && &boot_process_hist_count) {
+          unsigned n=boot_process_hist_count,first=n>8?n-8:0;
+          for(unsigned i=first;i<n;++i)umi_boot_log_line("BBHIST",boot_process_hist_rows[i%8]);
+        }
+        umi_sys_profile_dump();
+        if(umi_cpufreq_late)umi_cpufreq_late();
+        {char ab[64];snprintf(ab,sizeof(ab),"spawn n%u err%d stage%d/%d",umi_adreno_spawn_count,umi_adreno_spawn_error,umi_adreno_fail_stage,umi_adreno_fail_error);umi_boot_log_line("ADRENOPROBED",ab);}
+        {char sb[120];snprintf(sb,sizeof(sb),"purplebuddy st%d mgcache-removed %d keychain-moved %d data-ark %d",umi_skip_setup_status,umi_mg_cache_removed,umi_keychain_moved,umi_data_ark_status);umi_boot_log_line("SETUPSKIP",sb);}
+        if(&native_data_persist_state) {
+          char b[200];
+          snprintf(b,sizeof(b),"st%u hdr%u pages%llu loaded%llu writes%llu syncs%llu err%llu present%llu lba%llx",
+            native_data_persist_state,native_data_persist_header,(unsigned long long)native_data_persist_pages,
+            (unsigned long long)native_data_persist_loaded,(unsigned long long)native_data_persist_writes,
+            (unsigned long long)native_data_persist_syncs,(unsigned long long)native_data_persist_errors,
+            (unsigned long long)native_data_persist_present,(unsigned long long)native_data_persist_first_lba);
+          umi_boot_log_line("PERSIST",b);
+        }
+      }
+      {
+        // Freshness of the rows above (a stuck proc_iterate leaves an early pass published), process
+        // exit accounting, and the sleh syscall counters that used to ride on the GPU heartbeat.
+        char b[200];
+        snprintf(b,sizeof(b),"pass%u seen%u worker%u attempt%u busy%u age%us",
+          &boot_process_passes?boot_process_passes:0,&boot_process_seen?boot_process_seen:0,
+          __atomic_load_n(&process_worker_status,__ATOMIC_ACQUIRE),
+          &boot_process_attempts?__atomic_load_n(&boot_process_attempts,__ATOMIC_RELAXED):0,
+          &boot_process_busy?__atomic_load_n(&boot_process_busy,__ATOMIC_ACQUIRE):0,process_capture_age);
+        umi_boot_log_line("PROCPASS",b);
+        snprintf(b,sizeof(b),"svc u%u max(%d:%llums) tot%llums",
+          &native_p1_unix_cnt?native_p1_unix_cnt:0,&native_p1_max_sys?native_p1_max_sys:0,
+          (unsigned long long)((&native_p1_max_ticks?native_p1_max_ticks:0)/19200ull),
+          (unsigned long long)((&native_p1_total_ticks?native_p1_total_ticks:0)/19200ull));
+        umi_boot_log_line("SVCSTAT",b);
+        // Root I/O path cost: 4 KiB blocks copied out, failures, and generic-timer time spent inside
+        // hostRead4k (synchronous, single UFS slot, caller's thread = the faulting thread).
+        snprintf(b,sizeof(b),"blk%llu ver%llu fail%llu read%llums",
+          (unsigned long long)(&native_ufs_block_reads?native_ufs_block_reads:0),
+          (unsigned long long)(&native_ufs_verified_blocks?native_ufs_verified_blocks:0),
+          (unsigned long long)(&native_ufs_block_failures?native_ufs_block_failures:0),
+          (unsigned long long)((&native_ufs_read_ticks?native_ufs_read_ticks:0)/19200ull));
+        umi_boot_log_line("UFSSTAT",b);
+        if(&native_ufs_link_info) {
+          uint32_t li[7];
+          int got=native_ufs_link_info(li,7);
+          snprintf(b,sizeof(b),"dme%d rxg%x txg%x series%x pwr%x rxl%x txl%x cmds%u",
+            got,li[0],li[1],li[2],li[3],li[4],li[5],li[6]);
+          umi_boot_log_line("UFSLINK",b);
+        }
+        snprintf(b,sizeof(b),"hit%llu fill%llu bypass%llu fast%llu/%llublk | store hit%llu fill%llu byp%llu upd%llu",
+          (unsigned long long)(&native_ufs_cache_hits?native_ufs_cache_hits:0),
+          (unsigned long long)(&native_ufs_cache_fills?native_ufs_cache_fills:0),
+          (unsigned long long)(&native_ufs_cache_bypass?native_ufs_cache_bypass:0),
+          (unsigned long long)(&native_ufs_cache_fast?native_ufs_cache_fast:0),
+          (unsigned long long)(&native_ufs_cache_fast_blocks?native_ufs_cache_fast_blocks:0),
+          (unsigned long long)(&native_ufs_store_cache?native_ufs_store_cache[0]:0),(unsigned long long)(&native_ufs_store_cache?native_ufs_store_cache[1]:0),
+          (unsigned long long)(&native_ufs_store_cache?native_ufs_store_cache[2]:0),(unsigned long long)(&native_ufs_store_cache?native_ufs_store_cache[3]:0));
+        umi_boot_log_line("UFSCACHE",b);
+        if(&native_p1_lsd_seq && &native_p1_lsd_first && &native_p1_lsd_last){
+          const uint32_t total=native_p1_lsd_seq;
+          snprintf(b,sizeof(b),"total %u",total);umi_boot_log_line("LSDF",b);
+          for(unsigned i=0;i<64 && i<total;++i){
+            snprintf(b,sizeof(b),"#%u s%d e%d %s",native_p1_lsd_first[i].seq,native_p1_lsd_first[i].sys,native_p1_lsd_first[i].err,native_p1_lsd_first[i].path);
+            umi_boot_log_line("LSDF",b);
+          }
+          for(unsigned k=0;k<16 && total>64;++k){
+            const uint32_t seq=total>=16?total-16+k:k;if(seq<64)continue;
+            const struct umi_lsd_rec *r=&native_p1_lsd_last[seq%16];
+            snprintf(b,sizeof(b),"#%u s%d e%d %s",r->seq,r->sys,r->err,r->path);umi_boot_log_line("LSDL",b);
+          }
+        }
+        if(&native_ufs_fast){
+          snprintf(b,sizeof(b),"cmds%llu maxq%llu fallback%llu slotwait%llu err%llu setup%llu poll%llums max%lluus | e ocs%x rsp%08x scsi%x res%x",
+            (unsigned long long)native_ufs_fast[0],(unsigned long long)native_ufs_fast[1],(unsigned long long)native_ufs_fast[2],
+            (unsigned long long)native_ufs_fast[3],(unsigned long long)native_ufs_fast[4],(unsigned long long)native_ufs_fast[5],
+            (unsigned long long)(native_ufs_fast[6]/1000),(unsigned long long)native_ufs_fast[7],
+            &native_ufs_fast_err?native_ufs_fast_err[0]:0,&native_ufs_fast_err?native_ufs_fast_err[1]:0,
+            &native_ufs_fast_err?native_ufs_fast_err[2]:0,&native_ufs_fast_err?native_ufs_fast_err[3]:0);
+          umi_boot_log_line("UFSFAST",b);
+        }
+        unsigned spins=0;
+        while(__atomic_exchange_n(&exit_lock,1,__ATOMIC_ACQUIRE) && ++spins<1000000){}
+        struct bp_exits ex=exit_records;
+        struct bp_exit_tally tally[48];memcpy(tally,exit_tally,sizeof(tally));unsigned tally_other=exit_tally_other;
+        __atomic_store_n(&exit_lock,0,__ATOMIC_RELEASE);
+        snprintf(b,sizeof(b),"total%u nonzero%u crashsig%u dropped%u",ex.total,ex.failed,ex.crashes,
+          __atomic_load_n(&exit_dropped,__ATOMIC_RELAXED));
+        umi_boot_log_line("EXIT",b);
+        // Top 16 exiting process names, most frequent first.
+        for(unsigned k=0;k<24;++k) {
+          unsigned best=48,bn=0;
+          for(unsigned i=0;i<48;++i)if(tally[i].name[0] && tally[i].n>bn){bn=tally[i].n;best=i;}
+          if(best==48)break;
+          const struct bp_exit_tally *t=&tally[best];
+          snprintf(b,sizeof(b),"%.31s n%u bad%u crash%u last status=%x sig=%u exit=%u ns=%u sub=%llx",t->name,t->n,t->bad,t->crash,
+            t->status,t->status&127,(t->status>>8)&255,t->ns,(unsigned long long)t->code);
+          umi_boot_log_line("EXITTALLY",b);
+          tally[best].n=0;
+        }
+        if(tally_other){snprintf(b,sizeof(b),"other names %u",tally_other);umi_boot_log_line("EXITTALLY",b);}
+        for(unsigned i=0;i<3;++i)if(trap_rows[i][0])umi_boot_log_line("EXITTRAP",trap_rows[i]);
+        for(unsigned i=0;i<6;++i)if(xp_trace[i][0]){char xb[560];snprintf(xb,sizeof(xb),"%s %s",xp_trace_label[i],xp_trace[i]);umi_boot_log_line("XPTRACE",xb);}
+        for(unsigned i=0;i<24 && i<umi_exec_fail_count;++i){snprintf(b,sizeof(b),"x%u %.170s",umi_exec_fail_hits[i],umi_exec_fail_rows[i]);umi_boot_log_line("EXECFAIL",b);}
+        if(umi_exec_fail_other){snprintf(b,sizeof(b),"other %u",umi_exec_fail_other);umi_boot_log_line("EXECFAIL",b);}
+        for(unsigned i=0;i<3 && i<ex.crashes;++i)if(ex.crash[i][0])umi_boot_log_line("EXITCRASH",ex.crash[i]);
+        for(unsigned i=0;i<3;++i) {
+          unsigned n=ex.failed>3?ex.failed-3:0;
+          if(n+i<ex.failed)umi_boot_log_line("EXITFAIL",ex.failures[(n+i)%3]);
+        }
+        for(unsigned i=0;i<4;++i) {
+          unsigned n=ex.total>4?ex.total-4:0;
+          if(n+i<ex.total)umi_boot_log_line("EXITRECENT",ex.recent[(n+i)%4]);
+        }
+      }
+      umi_boot_log_panic_flush_and_reset();
+    }
     assert_wait_timeout((event_t)&thread_count,THREAD_UNINT,1000,NSEC_PER_MSEC);
     thread_block(THREAD_CONTINUE_NULL);
   }
 }
 void boot_progress_start(void) {
+  umi_reset_init();
   if (!enabled || started) return;
   started=1;thread_t thread;
   umi_user_start();

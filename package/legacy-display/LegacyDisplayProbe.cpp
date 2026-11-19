@@ -18,9 +18,12 @@ extern "C" void native_legacy_display_static_init(void) __asm__("__GLOBAL__sub_I
 extern "C" IOService *native_legacy_display_allocate(void);
 extern "C" void native_gop_presenter_static_init(void) __asm__("__GLOBAL__sub_I_NativeGOPPresenter.cpp");
 extern "C" IOService *native_gop_presenter_create(void);
+extern "C" bool native_gop_gpu_offer(IOService *,void *display,IOMemoryDescriptor *,uint64_t stride,uint32_t width,uint32_t height,uint32_t format);
+extern "C" void native_gop_presenter_set_source(IOService *presenter,IOService *nub);
 static IOService *pendingLegacyDisplay;
 static IOService *activeGOPPresenter,*activeGOPNub;
 static IOService *activeLegacyDisplay;
+static IOService *gpuHandoffPresenter;
 // Keep one diagnostic mapping alive until reboot, even after backend stop.
 // The pulse is permanently closed before any system-frame copy.
 static IOMemoryMap *diagnosticAnchorMapping;
@@ -161,8 +164,69 @@ void native_legacy_frame_colors_observed(const uint32_t *colors,const uint64_t *
     for(unsigned i=0;i<4;++i){native_legacy_frame_colors[n][i]=colors[i];native_legacy_frame_color_counts[n][i]=counts[i];}
     native_legacy_frame_color_other[n]=other;
 }
+extern uint64_t native_legacy_surface_stride_raw(OSObject *);
+extern uint64_t native_legacy_surface_allocation(OSObject *);
+extern uint64_t native_legacy_surface_height(OSObject *);
+uint64_t native_legacy_surface_stride(OSObject *surface) {
+    uint64_t stride=native_legacy_surface_stride_raw(surface);
+    uint64_t allocation=native_legacy_surface_allocation(surface);
+    uint64_t height=native_legacy_surface_height(surface);
+    if(stride && allocation && height && stride<=allocation/height/4)return stride*4;
+    return stride;
+}
+volatile uint64_t native_legacy_rej_surface[7];
+void native_legacy_surface_rejected(uint64_t width,uint64_t height,uint32_t format,uint32_t planes,
+    uint64_t stride,uint64_t allocation,uint64_t bytes) {
+    native_legacy_rej_surface[0]=width;
+    native_legacy_rej_surface[1]=height;
+    native_legacy_rej_surface[2]=format;
+    native_legacy_rej_surface[3]=planes;
+    native_legacy_rej_surface[4]=stride;
+    native_legacy_rej_surface[5]=allocation;
+    native_legacy_rej_surface[6]=bytes;
+}
+volatile uint32_t native_legacy_swap_stage_counts[4];
+void native_legacy_swap_stage(unsigned stage) {
+    if(stage<4)native_legacy_swap_stage_counts[stage]=native_legacy_swap_stage_counts[stage]+1;
+}
+volatile uint64_t native_legacy_vsync_events[6];
+volatile unsigned native_legacy_vsync_hz;
+void native_legacy_vsync_observed(unsigned event,unsigned hz) {
+    if(event<6)native_legacy_vsync_events[event]=native_legacy_vsync_events[event]+1;
+    native_legacy_vsync_hz=hz;
+}
+volatile uint32_t native_legacy_gpu_fallbacks;
+volatile int native_legacy_gpu_last_status;
+bool native_legacy_gpu_offer(void *display,IOMemoryDescriptor *memory,uint64_t stride,uint32_t width,uint32_t height,uint32_t format) {
+    if(!gpuHandoffPresenter)return false;
+    return native_gop_gpu_offer(gpuHandoffPresenter,display,memory,stride,width,height,format);
+}
+void native_legacy_gpu_fallback_observed(int status) {
+    native_legacy_gpu_last_status=status;
+    native_legacy_gpu_fallbacks=native_legacy_gpu_fallbacks+1;
+}
+__attribute__((weak)) volatile uint32_t native_ufs_dpu_state;
+__attribute__((weak)) uint32_t native_ufs_dpu_map(unsigned slot,const uint64_t *pages,unsigned count) {
+    (void)slot;(void)pages;(void)count;return 0;
+}
+__attribute__((weak)) bool native_adreno_fences(uint32_t *submitted,uint32_t *retired) {
+    if(submitted)*submitted=0;
+    if(retired)*retired=0;
+    return false;
+}
+__attribute__((weak)) bool native_adreno_fences_detail(uint32_t *submitted,uint32_t *retired,uint32_t *detail) {
+    if(submitted)*submitted=0;
+    if(retired)*retired=0;
+    if(detail){detail[0]=0;detail[1]=0;detail[2]=4;}
+    return false;
+}
+__attribute__((weak)) int native_gpu_trace_enabled(void) { return 0; }
+__attribute__((weak)) void native_gpu_trace_record(uint32_t event,uint32_t pid,const uint64_t *values,uint32_t count) {
+    (void)event;(void)pid;(void)values;(void)count;
+}
+__attribute__((weak)) void t970_dpu_wait_frame(void) {}
 void native_legacy_swap_validation_observed(bool accepted,unsigned reason,const void *request,const void *surface) {
-    if(accepted)native_legacy_swap_accepted_count=native_legacy_swap_accepted_count+1;
+    if(accepted){native_legacy_swap_stage(0);native_legacy_swap_accepted_count=native_legacy_swap_accepted_count+1;}
     else {native_legacy_swap_rejected_count=native_legacy_swap_rejected_count+1;recordRejectedSwap(reason,request,surface);}
     native_legacy_swap_validation_calls=native_legacy_swap_validation_calls+1;
     native_legacy_swap_validation_result=accepted;native_legacy_swap_validation_reason=reason;
@@ -178,6 +242,7 @@ void native_legacy_copy_timing_observed(uint64_t ticks,uint64_t bytes) {
 }
 __attribute__((noinline)) void native_legacy_transfer_observed(IOReturn status,const void *request,uint64_t bytes) {
     native_legacy_transfer_calls=native_legacy_transfer_calls+1;
+    if(status==kIOReturnSuccess)native_legacy_swap_stage(2);
     native_legacy_transfer_status=status;native_legacy_transfer_request=(uintptr_t)request;native_legacy_transfer_bytes=bytes;
     if(status!=kIOReturnSuccess && boot_progress_stage) {
         char message[120];snprintf(message,sizeof(message),"DISPLAY COPY FAILED status=%08x prepare=%u tries=%u",
@@ -365,7 +430,23 @@ void native_legacy_display_late_probe(void) {
                     if(native_legacy_probe_match)attached=display->attach(nub);
                     if(attached){native_legacy_stage=5;started=display->start(nub);native_legacy_start_result=started;}
                     if(started && phase==4) {
-                        activeLegacyDisplay=display;activeGOPNub=nub;native_legacy_stage=10;
+                        activeLegacyDisplay=display;activeGOPNub=nub;
+                        unsigned gpu=0;
+                        if(!PE_parse_boot_argn("fb-gpu",&gpu,sizeof(gpu)))
+                            PE_parse_boot_argn("sheng-fb-gpu",&gpu,sizeof(gpu));
+                        if(gpu==1) {
+                            IOService *handoff=native_gop_presenter_create();
+                            IOService *home=IOService::getResourceService();
+                            bool handoffAttached=false;
+                            if(handoff && home)native_gop_presenter_set_source(handoff,nub);
+                            if(handoff && home && handoff->init() && (handoffAttached=handoff->attach(home)) && handoff->start(home)) {
+                                gpuHandoffPresenter=handoff;
+                            } else {
+                                if(handoffAttached)handoff->detach(home);
+                                OSSafeReleaseNULL(handoff);
+                            }
+                        }
+                        native_legacy_stage=10;
                         finishUnitScalePolicy(true);
                         OSSafeReleaseNULL(displayTreeParent);
                         native_legacy_display_checkpoint();return;

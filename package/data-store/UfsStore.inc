@@ -77,15 +77,63 @@ extern "C" int native_ufs_store_open (uint64_t blocks, uint64_t *firstLba, const
   return ok;
 }
 
-extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
+// umi-170 read-ahead for the store (umi-store-ra, default 1): the overlay reads present Data pages one APFS request at a time
+// (4-16 KiB), each a synchronous single-slot UFS command; one boot read ~160k such pages (UFSSTAT read ~118 s), which is what
+// Settings and lsd waited on. A small read fills the 32-block (128 KiB) chunk aligned to the region that holds it; later reads of
+// its neighbours come from RAM. Writes update the cached copies, so the cache never goes stale. The overlay serializes all store
+// I/O (DirectDisk.h), so no lock. Absent pages in a chunk are cached too but never asked for (the overlay reads only present ones).
+namespace {
+constexpr uint32_t kStoreSpan = kDataMax / 4096;   // 32 blocks
+constexpr unsigned kStoreSlots = 128;              // 16 MiB
+struct StoreSlot { uint64_t base; uint32_t count, age; uint8_t *data; };
+StoreSlot gStoreSlot[kStoreSlots];
+uint32_t gStoreClock;
+int gStoreRa = -1;
+}
+extern "C" { volatile uint64_t native_ufs_store_cache[4]; }   // [0] hits, [1] fills, [2] bypass (large or off), [3] write updates
+
+static int storeRawRead (uint64_t rel, uint32_t blocks, void *dst)
 {
-  if (!gStoreRegionBlocks || !dst || !blocks || rel >= gStoreRegionBlocks || blocks > gStoreRegionBlocks - rel) return 0;
   while (blocks) {
-    uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
-    if (hostRead4k (0, gStoreRegionFirst + rel, chunk, dst) != kIOReturnSuccess) return 0;
+    uint32_t chunk = blocks > kStoreSpan ? kStoreSpan : blocks;
+    if (umiFastRead4k (0, gStoreRegionFirst + rel, chunk, dst) != kIOReturnSuccess) return 0;
     dst = static_cast<uint8_t *> (dst) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;
+  }
+  return 1;
+}
+
+extern "C" int native_ufs_store_read (uint64_t rel, uint32_t blocks, void *dst)
+{
+  if (!gStoreRegionBlocks || !dst || !blocks || rel >= gStoreRegionBlocks || blocks > gStoreRegionBlocks - rel) return 0;
+  if (gStoreRa < 0) { unsigned ra = 1; PE_parse_boot_argn ("umi-store-ra", &ra, sizeof (ra)); gStoreRa = ra ? 1 : 0; }
+  if (!gStoreRa || blocks >= kStoreSpan) { native_ufs_store_cache[2] = native_ufs_store_cache[2] + 1; return storeRawRead (rel, blocks, dst); }
+  uint8_t *out = static_cast<uint8_t *> (dst);
+  while (blocks) {
+    const uint64_t base = rel - rel % kStoreSpan;
+    const uint32_t count = static_cast<uint32_t> (gStoreRegionBlocks - base < kStoreSpan ? gStoreRegionBlocks - base : kStoreSpan);
+    StoreSlot *slot = nullptr, *victim = nullptr;
+    for (unsigned i = 0; i < kStoreSlots; ++i) {
+      StoreSlot &s = gStoreSlot[i];
+      if (s.data && s.count && s.base == base) { slot = &s; break; }
+      if (!victim || !s.count || (victim->count && s.age < victim->age)) victim = &s;
+    }
+    if (slot) native_ufs_store_cache[0] = native_ufs_store_cache[0] + 1;
+    else {
+      if (!victim->data) victim->data = static_cast<uint8_t *> (IOMallocData (kStoreSpan * 4096ULL));
+      if (!victim->data) { native_ufs_store_cache[2] = native_ufs_store_cache[2] + 1; return storeRawRead (rel, blocks, dst); }
+      victim->count = 0;
+      if (umiFastRead4k (0, gStoreRegionFirst + base, count, victim->data) != kIOReturnSuccess) return 0;
+      victim->base = base; victim->count = count;
+      native_ufs_store_cache[1] = native_ufs_store_cache[1] + 1;
+      slot = victim;
+    }
+    slot->age = ++gStoreClock;
+    const uint32_t skip = static_cast<uint32_t> (rel - base);
+    const uint32_t take = blocks < count - skip ? blocks : count - skip;
+    memcpy (out, slot->data + skip * 4096ULL, take * 4096ULL);
+    out += take * 4096ULL; rel += take; blocks -= take;
   }
   return 1;
 }
@@ -97,7 +145,16 @@ extern "C" int native_ufs_store_write (uint64_t rel, uint32_t blocks, const void
   while (blocks) {
     uint32_t chunk = blocks > kDataMax / 4096 ? static_cast<uint32_t> (kDataMax / 4096) : blocks;
     // Forced unit access: the block is on the medium when the command completes, so the overlay needs no cache flush.
-    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, true) != kIOReturnSuccess) return 0;
+    if (hostWrite4k (0, gStoreRegionFirst + rel, chunk, src, true) != kIOReturnSuccess) {
+      for (auto &s : gStoreSlot) if (s.count && rel < s.base + s.count && s.base < rel + chunk) s.count = 0;   // unknown medium state
+      return 0;
+    }
+    for (auto &s : gStoreSlot) {                       // keep cached chunks equal to the medium
+      if (!s.count || rel >= s.base + s.count || s.base >= rel + chunk) continue;
+      const uint64_t from = rel > s.base ? rel : s.base, to = rel + chunk < s.base + s.count ? rel + chunk : s.base + s.count;
+      memcpy (s.data + (from - s.base) * 4096ULL, static_cast<const uint8_t *> (src) + (from - rel) * 4096ULL, (to - from) * 4096ULL);
+      native_ufs_store_cache[3] = native_ufs_store_cache[3] + 1;
+    }
     src = static_cast<const uint8_t *> (src) + chunk * 4096ULL;
     rel += chunk;
     blocks -= chunk;

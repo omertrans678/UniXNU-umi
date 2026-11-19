@@ -31,10 +31,10 @@ extern void umi_touch_log_commit(unsigned);
 unsigned umi_console_lock;
 static unsigned enabled,started,lock,events,flushed,dropped;
 static uint64_t records[96][48];
-static unsigned quota[12][10],errors[4];
-static const char *names[]={"usermanagerd","containermanagerd","pkd","SpringBoard","backboardd","keybagd","lsd","cfprefsd","runningboardd","mmaintenanced","adid","launchd"};
+static unsigned quota[16][10],errors[4];
+static const char *names[]={"usermanagerd","containermanagerd","pkd","SpringBoard","backboardd","keybagd","lsd","cfprefsd","runningboardd","cryptexd","xpcproxy","launchd","PerfPowerServices","mDNSResponder","WindowServer","chronod"};
 static unsigned now(void){uint64_t c;__asm__ volatile("isb\n\tmrs %0,cntpct_el0":"=r"(c));return boot_progress_frequency?(unsigned)((c-boot_progress_epoch)/boot_progress_frequency):0;}
-static int selected(const char *name){for(unsigned i=0;i<12;++i)if(!strcmp(name,names[i]))return (int)i;return -1;}
+static int selected(const char *name){for(unsigned i=0;i<16;++i)if(!strcmp(name,names[i]))return (int)i;return -1;}
 static int contains(const char *s,const char *needle) {
   for(;*s;++s){const char *a=s,*b=needle;while(*a&&*b){char c=*a;if(c>='A'&&c<='Z')c+=32;if(c!=*b)break;++a;++b;}if(!*b)return 1;}return 0;
 }
@@ -96,11 +96,13 @@ static void snapshot(unsigned seq) {
     for(unsigned i=0;i<8;++i){vp=NULLVP;int e=vnode_lookup(paths[i],0,&vp,vfs_context_kernel());
       if(!e){struct vnode_attr a={0};VATTR_INIT(&a);VATTR_WANTED(&a,va_uid);VATTR_WANTED(&a,va_gid);VATTR_WANTED(&a,va_mode);e=vnode_getattr(vp,&a,vfs_context_kernel());if(!e){v[33+i*4]=a.va_uid;v[34+i*4]=a.va_gid;v[35+i*4]=a.va_mode;}vnode_put(vp);}v[32+i*4]=(uint32_t)e;}
   }
+  const uint64_t ram_bytes=&native_ram_block_bytes?native_ram_block_bytes:0;
+  const uint64_t ram_res=&native_ram_block_resident_bytes?native_ram_block_resident_bytes:0;
   const uint64_t data[]={native_data_persist_state,native_data_persist_header,native_data_persist_gpt,native_data_persist_gpt_after,
     native_data_persist_pages,native_data_persist_loaded,native_data_persist_writes,native_data_persist_syncs,native_data_persist_errors,native_data_persist_present,native_data_persist_first_lba,
-    native_ram_block_bytes,native_ram_block_resident_bytes,events,dropped,errors[0],errors[1],errors[2],errors[3],(unsigned)nprocs};memcpy(v+12,data,sizeof(data));
+    ram_bytes,ram_res,events,dropped,errors[0],errors[1],errors[2],errors[3],(unsigned)nprocs};memcpy(v+12,data,sizeof(data));
   // Existing diagnostic extension slots; no display ownership or drawing changes.
-  snprintf(boot_progress_ext_wide[0],112,"DATA MiB=%llu free=%llu avail=%llu fs=%u persist=%u writes=%llu errors=%llu",native_ram_block_bytes>>20,(v[6]*v[4])>>20,(v[7]*v[4])>>20,(unsigned)v[3],native_data_persist_state,native_data_persist_writes,native_data_persist_errors);
+  snprintf(boot_progress_ext_wide[0],112,"DATA MiB=%llu free=%llu avail=%llu fs=%u persist=%u writes=%llu errors=%llu",ram_bytes>>20,(v[6]*v[4])>>20,(v[7]*v[4])>>20,(unsigned)v[3],native_data_persist_state,native_data_persist_writes,native_data_persist_errors);
   snprintf(boot_progress_ext_wide[1],112,"USER records=%u dropped=%u ENOSPC=%u access=%u rofs=%u quota=%u",events,dropped,errors[0],errors[1],errors[2],errors[3]);
   emit("DATA",seq,v,64);
 }

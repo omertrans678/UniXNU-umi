@@ -30,6 +30,7 @@ volatile uint32_t native_touch_seq,native_touch_count,native_touch_hid_reports,n
 volatile int native_touch_xs[12],native_touch_ys[12],native_touch_ids[12];
 volatile unsigned native_touch_stage_req;
 char native_touch_rows[4][120];
+static volatile unsigned umiFtsBadEvents;static uint8_t umiFtsFirstBad[8];
 extern char boot_progress_ext[8][48];
 extern volatile uint32_t native_hid_stage,native_hid_resource_found,native_hid_input_events[8],native_touch_edge_stats[4];
 extern volatile int native_hid_load_status,native_hid_matching_load_status,native_hid_input_results[8];
@@ -138,6 +139,38 @@ static bool publish(void) {
         native_touch_ids[n]=i;native_touch_xs[n]=state.points[i].x;native_touch_ys[n]=state.points[i].y;++n;
     }native_touch_count=n;__atomic_store_n(&native_touch_seq,seq+2,__ATOMIC_RELEASE);
     return queue(state);
+}
+// umi-168 unattended touch script (umi-touch-script=<driver seconds to start>, 0 = off): synthetic contacts on reserved
+// ID 9 through the same publish() queue as the panel, plus Home presses through the HID mailbox. Steps: swipe up (unlock),
+// tap the dock centre, Home, then three taps across the first icon row, each followed by Home. Results: umi_touch_script
+// [0] steps done, [1] frames injected, [2] last step (ms since driver start), [3] Home presses asked.
+extern "C" {volatile uint32_t umi_touch_script[4];extern volatile uint32_t native_hid_input_command;}
+struct UmiScriptStep {uint32_t at_ms; uint8_t kind; uint16_t x0,y0,x1,y1; uint16_t dur_ms;};   // kind 1 swipe, 2 tap, 3 Home
+static const UmiScriptStep kScript[]={
+    {0,1,540,2320,540,1100,400},{6000,2,540,2200,0,0,80},{14000,3,0,0,0,0,0},
+    {20000,2,200,350,0,0,80},{28000,3,0,0,0,0,0},{34000,2,540,350,0,0,80},{42000,3,0,0,0,0,0},
+    {48000,2,880,350,0,0,80},{56000,3,0,0,0,0,0}};
+static void scriptTick(uint64_t nowMs) {
+    static int configured=-1;static uint64_t startMs;static unsigned step;static bool down;static uint16_t lastX,lastY;
+    if(configured<0){unsigned at=0;PE_parse_boot_argn("umi-touch-script",&at,sizeof(at));configured=at?1:0;startMs=uint64_t(at)*1000;}
+    if(!configured || step>=ARRAY_SIZE(kScript) || nowMs<startMs)return;
+    const UmiScriptStep &k=kScript[step];const uint64_t rel=nowMs-startMs;
+    if(rel<k.at_ms)return;
+    UmiTouchPoint &p=state.points[9];
+    if(k.kind==3){native_hid_input_command=1;umi_touch_script[3]=umi_touch_script[3]+1;}
+    else {
+        const uint64_t t=rel-k.at_ms;
+        if(t<k.dur_ms){
+            uint16_t x=k.kind==1?uint16_t(k.x0+(int(k.x1)-int(k.x0))*int64_t(t)/k.dur_ms):k.x0;
+            uint16_t y=k.kind==1?uint16_t(k.y0+(int(k.y1)-int(k.y0))*int64_t(t)/k.dur_ms):k.y0;
+            if(!down || x!=lastX || y!=lastY){p.x=x;p.y=y;p.active=1;down=true;lastX=x;lastY=y;
+                if(publish())umi_touch_script[1]=umi_touch_script[1]+1;}
+            return;
+        }
+        if(k.kind==1 && (lastX!=k.x1 || lastY!=k.y1)){p.x=k.x1;p.y=k.y1;p.active=1;if(publish())umi_touch_script[1]=umi_touch_script[1]+1;}
+        p.active=0;down=false;if(publish())umi_touch_script[1]=umi_touch_script[1]+1;
+    }
+    umi_touch_script[2]=uint32_t(nowMs);++step;umi_touch_script[0]=step;
 }
 // Bounded logs: protocol quota plus one reserved stop, and64 contacts,
 // plus periodic summaries. Separate quotas keep startup status from hiding fingers.
@@ -342,7 +375,8 @@ extern "C" void umi_touch_snapshot(uint64_t v[32]) {
     v[21]=native_touch_hid_reports;v[22]=native_touch_loop_step;v[23]=producer-consumer;
     for(unsigned i=0;i<4;++i)v[24+i]=native_touch_edge_stats[i];
     v[28]=state.sequence;v[29]=logPublished;v[30]=seconds();v[31]=native_hid_input_events[7];
-    snprintf(boot_progress_ext[4],48,"FTS stage=%u err=%u raw=%u pt=%u",stage,failure,rawCount,pointCount);
+    snprintf(boot_progress_ext[4],48,"FTS s=%u e=%u raw=%u pt=%u bad=%u %02x%02x%02x%02x",stage,failure,rawCount,pointCount,
+             umiFtsBadEvents,umiFtsFirstBad[0],umiFtsFirstBad[1],umiFtsFirstBad[2],umiFtsFirstBad[3]);
     snprintf(boot_progress_ext[5],48,"TOUCH n=%u q=%u drop=%u ack=%x",native_touch_count,producer-consumer,queueDrops,lastAck);
     snprintf(boot_progress_ext[6],48,"HID st=%u start=%u rpt=%u rc=%x",native_hid_stage,native_hid_input_events[2],native_touch_hid_reports,(unsigned)native_hid_input_results[6]);
     snprintf(boot_progress_ext[7],48,"EDGE on=%u start=%u edge=%u",native_touch_edge_stats[0],native_touch_edge_stats[1],native_touch_edge_stats[2]);
@@ -557,7 +591,9 @@ static void worker(void *,wait_result_t) {
             if(decoded==UMI_FTS_RESET){++resetCount;if(resetCount>3){record(e,decoded);stop(5);return;}scan=true;stage=5;publish();}
             if(decoded==UMI_FTS_POINT){++pointCount;if(!publish()){record(e,decoded);stop(6);return;}}
             if(decoded==UMI_FTS_FAULT){++chipErrors;record(e,decoded);stop(7);return;}
-            if(decoded==UMI_FTS_BAD){record(e,decoded);stop(8);return;}
+            // umi-156: an event this decoder does not know (status, gesture, out-of-range contact) used to stop the driver for good
+            // after the unlock swipe; count it, keep the first one's bytes, and go on reading.
+            if(decoded==UMI_FTS_BAD){if(!umiFtsBadEvents)memcpy(umiFtsFirstBad,e,8);++umiFtsBadEvents;}
             record(e,decoded);
             if(scan){
                 if(resetCount<3){
@@ -649,6 +685,7 @@ static void worker(void *,wait_result_t) {
         if(stage==6 && healthRecord<ARRAY_SIZE(healthTimes) && seconds()>=healthTimes[healthRecord]){
             recordSensing();if(healthRecord<2)recordGpi(0);++healthRecord;
         }
+        if(stage==6)scriptTick(GetTimeInNanoSecond(GetPerformanceCounter()-epoch)/1000000ull);
         IOSleep(sleepMs);
     }
 }

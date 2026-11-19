@@ -22,7 +22,8 @@ def main():
     OUT.mkdir(exist_ok=True, parents=True)
     objects, commands = [], {}
     for name in ("BootProgress", "BootFaultProbe", "BootWatchdogPolicy",
-                 "BootProcessProbe", "BootUiTraceProbe", "UmiUserspaceProbe"):
+                 "BootProcessProbe", "BootUiTraceProbe", "UmiUserspaceProbe",
+                 "UmiReset", "UmiBootLog", "UmiCpuFreq"):
         record_path = (OBJ / "bsd/DEVELOPMENT/kern_exec.o.json" if name in ("BootWatchdogPolicy", "UmiUserspaceProbe")
                        else OBJ / "osfmk/DEVELOPMENT/startup.o.json")
         r = json.loads(record_path.read_text().strip().rstrip(","))
@@ -44,7 +45,7 @@ def main():
                 command.append(arg)
             i += 1
         command += ["-DUMI_FTS_TOUCH=" + os.environ.get("UMI_FTS_TOUCH", "0"), "-DXNU_BOOT_PROGRESS=1", "-DUMI_BOOT_PROGRESS_PHONE=" + phone,
-                    "-DUMI_RUNTIME_TRACE=" + str(int(phone == "1" and os.environ.get("XNU_NATIVE_RAM_BLOCK") == "1" and os.environ.get("XNU_NATIVE_LEGACY_DISPLAY") == "1")),
+                    "-DUMI_RUNTIME_TRACE=" + str(int(os.environ.get("UMI_RUNTIME_TRACE") == "1" or (phone == "1" and (os.environ.get("XNU_NATIVE_RAM_BLOCK") == "1" or os.environ.get("XNU_NATIVE_UFS") == "1") and os.environ.get("XNU_NATIVE_LEGACY_DISPLAY") == "1"))),
                     "-mgeneral-regs-only", "-Wall", "-Wextra", "-Werror",
                     "-I", str(ROOT / ".cache/xnu-work/osfmk")]
         subprocess.run(command, cwd=r["directory"], check=True, timeout=90)
@@ -88,13 +89,18 @@ def main():
         providers.append(ROOT / ".cache/xnu-work/bsd/kern/bsd_init.c")
     if os.environ.get("UMI_FTS_TOUCH") == "1":
         providers.append(ROOT / "build/umi-touch/libUmiTouch.a")
+    # The syscall telemetry (native_p1_*) is defined in this tree's sleh.c, which the stage
+    # pipeline recompiles into the kernel after the observer; the reference kernel.macho lacks it.
+    sleh = ROOT / ".cache/xnu-work/osfmk/arm64/sleh.c"
+    if sleh.exists() and "native_p1_unix_cnt" in sleh.read_text():
+        providers.append(sleh)
     defined = set()
     for path in providers:
         if not path.exists():
             raise SystemExit("Missing actual provider inventory: " + str(path))
         if path.suffix == ".c":
             content = path.read_text()
-            for name in re.findall(r"\b(native_owner_root_\w+)\s*=", content):
+            for name in re.findall(r"\b(native_owner_root_\w+|native_p1_\w+)\s*(?:\[[^\]]*\])?\s*=", content):
                 defined.add("_" + name)
         else:
             defined.update(subprocess.check_output(

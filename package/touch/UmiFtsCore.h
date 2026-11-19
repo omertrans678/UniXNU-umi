@@ -26,7 +26,10 @@ static inline unsigned umi_fts_parse(UmiTouchFrame *f,const uint8_t e[8]) {
         unsigned changed=p->active;p->active=0;return changed?UMI_FTS_POINT:UMI_FTS_NONE;
     }
     unsigned x=((unsigned)(e[3]&15)<<8)|e[2],y=((unsigned)e[4]<<4)|(e[3]>>4);
-    if(x>1079 || y>2339)return UMI_FTS_BAD;
+    // umi-156: a contact at the panel edge reports one past the last pixel; clamp small overshoots, reject real garbage.
+    if(x>1079+64 || y>2339+64)return UMI_FTS_BAD;
+    if(x>1079)x=1079;
+    if(y>2339)y=2339;
     unsigned changed=!p->active||p->x!=x||p->y!=y;
     p->x=(uint16_t)x;p->y=(uint16_t)y;p->active=1;return changed?UMI_FTS_POINT:UMI_FTS_NONE;
 }
